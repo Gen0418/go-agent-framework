@@ -563,3 +563,87 @@ func TestBindEmptySession(t *testing.T) {
 		t.Fatalf("绑定空会话后 ID = %d，历史 = %+v", loop.SessionId, loop.msgs)
 	}
 }
+
+func TestSetOptsAppliesToNextTurn(t *testing.T) {
+	type capturedReq struct {
+		Thinking *struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
+		ReasoningEffort string      `json:"reasoning_effort"`
+		Tools           []apis.Tool `json:"tools"`
+	}
+
+	var gotReqs []capturedReq
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req capturedReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			http.Error(w, "请求格式错误", http.StatusBadRequest)
+			return
+		}
+		gotReqs = append(gotReqs, req)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, replyStream)
+	}))
+	t.Cleanup(server.Close)
+
+	db, err := storage.Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	tools := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
+	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, db, apis.StreamOptions{
+		Thinking:        true,
+		ReasoningEffort: "high",
+		Tools:           tools,
+	})
+	if err := loop.NewSession(t.Context(), "选项切换测试"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 外部修改原切片不应影响 AgentLoop 已保存的选项
+	tools[0].Function.Name = "mutated"
+	if err := loop.RunTurn(t.Context(), inputOnce(t, "第一轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 关闭思考与工具后，第二轮应生效
+	loop.SetOpts(apis.StreamOptions{
+		Thinking:        false,
+		ReasoningEffort: "max",
+		Tools:           nil,
+	})
+	if err := loop.RunTurn(t.Context(), inputOnce(t, "第二轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重新开启思考与工具，并再次验证外部切片隔离
+	nextTools := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
+	loop.SetOpts(apis.StreamOptions{
+		Thinking:        true,
+		ReasoningEffort: "low",
+		Tools:           nextTools,
+	})
+	nextTools[0].Function.Name = "mutated-again"
+	if err := loop.RunTurn(t.Context(), inputOnce(t, "第三轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gotReqs) != 3 {
+		t.Fatalf("收到 %d 次请求，预期 3 次", len(gotReqs))
+	}
+	if gotReqs[0].Thinking == nil || gotReqs[0].Thinking.Type != "enabled" ||
+		gotReqs[0].ReasoningEffort != "high" || len(gotReqs[0].Tools) != 1 || gotReqs[0].Tools[0].Function.Name != "bash" {
+		t.Fatalf("第一轮请求选项不符: %+v", gotReqs[0])
+	}
+	if gotReqs[1].Thinking == nil || gotReqs[1].Thinking.Type != "disabled" ||
+		gotReqs[1].ReasoningEffort != "" || len(gotReqs[1].Tools) != 0 {
+		t.Fatalf("第二轮请求选项不符: %+v", gotReqs[1])
+	}
+	if gotReqs[2].Thinking == nil || gotReqs[2].Thinking.Type != "enabled" ||
+		gotReqs[2].ReasoningEffort != "low" || len(gotReqs[2].Tools) != 1 || gotReqs[2].Tools[0].Function.Name != "bash" {
+		t.Fatalf("第三轮请求选项不符: %+v", gotReqs[2])
+	}
+}

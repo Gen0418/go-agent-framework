@@ -30,6 +30,7 @@ type app struct {
 	// 会话级信息
 	sessions      sessionList
 	sessionStates map[int64]*sessionState // sessionId -> sessionState
+	optsOpen      bool                    // 会话选项浮层是否展开
 
 	// 应用级错误
 	err error
@@ -39,7 +40,9 @@ func (a *app) sessionState(id int64) *sessionState {
 	if s, ok := a.sessionStates[id]; ok {
 		return s
 	}
-	s := &sessionState{opts: a.defaultOpts}
+	opts := a.defaultOpts
+	opts.Tools = slices.Clone(opts.Tools) // 独立拷贝 Tools，避免跨会话共享切片
+	s := &sessionState{opts: opts}
 	a.sessionStates[id] = s
 	return s
 }
@@ -104,6 +107,17 @@ func (s *sessionState) resolveConfirm(allow bool) {
 	select {
 	case c.reply <- allow:
 	default:
+	}
+}
+
+// 切换本会话是否启用工具
+func (s *sessionState) setToolsEnabled(enabled bool, defaults []apis.Tool) {
+	if !enabled {
+		s.opts.Tools = nil
+		return
+	}
+	if len(s.opts.Tools) == 0 {
+		s.opts.Tools = slices.Clone(defaults)
 	}
 }
 

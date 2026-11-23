@@ -13,6 +13,7 @@ coverage.out
 !.env.example
 !.env.*.example
 *.txt
+.DS_Store
 
 # SQLite databases and sidecar files
 *.db

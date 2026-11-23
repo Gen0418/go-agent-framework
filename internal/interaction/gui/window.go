@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go-agent-framework/internal/agent"
@@ -15,6 +16,8 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
+
+var reasoningEfforts = []string{"low", "high", "max"}
 
 func (a *app) view(c *ui.Context) {
 	ui.Row(c).Fill().Children(func() {
@@ -59,7 +62,10 @@ func (a *app) chat(c *ui.Context) {
 			a.renderConfirm(c, curSessionState) // 工具调用确认
 		}
 		ui.TextArea(c.Key(inputKey(curSession.Id)), &curSessionState.inputText) // 输入框
-		a.submitButton(c, curSession.Id, curSessionState)                       // 发送按钮
+		ui.Row(c).Children(func() {
+			a.sessionOptsPopover(c, curSessionState)          // 会话选项
+			a.submitButton(c, curSession.Id, curSessionState) // 发送按钮
+		})
 	})
 }
 
@@ -98,6 +104,38 @@ func (a *app) renderMessage(c *ui.Context, msg *chatMessage) {
 		default:
 			ui.Text(c, fmt.Sprintf("%s\n", msg.Content))
 		}
+	})
+}
+
+func (a *app) sessionOptsPopover(c *ui.Context, state *sessionState) {
+	optsButton := ui.Button(c, "选项")
+	if optsButton.Clicked() {
+		a.optsOpen = !a.optsOpen
+	}
+
+	ui.Popover(c, optsButton, &a.optsOpen, func() {
+		ui.Column(c).Children(func() {
+			ui.Text(c, fmt.Sprintf("模型: %s", a.cfg.DefaultModel))
+
+			ui.Checkbox(c, &state.opts.Thinking, "思考")
+			if state.opts.Thinking {
+				effortIdx := slices.Index(reasoningEfforts, state.opts.ReasoningEffort)
+				if effortIdx < 0 { // 未设强度时默认 low
+					effortIdx = 0
+					state.opts.ReasoningEffort = reasoningEfforts[0]
+				}
+				if ui.Segmented(c, &effortIdx, reasoningEfforts...).Changed() {
+					state.opts.ReasoningEffort = reasoningEfforts[effortIdx]
+				}
+			}
+
+			if len(a.defaultOpts.Tools) > 0 {
+				toolsOn := len(state.opts.Tools) > 0
+				if ui.Checkbox(c, &toolsOn, "允许工具调用").Changed() {
+					state.setToolsEnabled(toolsOn, a.defaultOpts.Tools)
+				}
+			}
+		})
 	})
 }
 
@@ -205,6 +243,8 @@ func (a *app) submit(submitId int64, submitInputText string) {
 			return
 		}
 		submitState.loop = submitLoop
+	} else {
+		submitLoop.SetOpts(submitState.opts) // 同步最新会话选项给已有 loop
 	}
 
 	inputFunc := func(ctx context.Context) (string, error) {

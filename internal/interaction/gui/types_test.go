@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"go-agent-framework/internal/agent"
+	"go-agent-framework/internal/apis"
 	"go-agent-framework/internal/storage"
 )
 
@@ -88,5 +89,60 @@ func TestSessionStateResolveConfirm(t *testing.T) {
 
 		// 重复调用或 confirm 为空时不应阻塞或 panic
 		s.resolveConfirm(!allow)
+	}
+}
+
+func TestSessionStateOptsIsolation(t *testing.T) {
+	a := &app{
+		defaultOpts: apis.StreamOptions{
+			Thinking:        true,
+			ReasoningEffort: "low",
+			Tools:           []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}},
+		},
+		sessionStates: make(map[int64]*sessionState),
+	}
+
+	s1 := a.sessionState(1)
+	s2 := a.sessionState(2)
+
+	s1.opts.Thinking = false
+	s1.opts.ReasoningEffort = "max"
+	s1.opts.Tools[0].Function.Name = "mutated"
+
+	if !a.defaultOpts.Thinking || a.defaultOpts.ReasoningEffort != "low" || a.defaultOpts.Tools[0].Function.Name != "bash" {
+		t.Fatalf("修改会话 1 选项污染了 defaultOpts: %+v", a.defaultOpts)
+	}
+	if !s2.opts.Thinking || s2.opts.ReasoningEffort != "low" || s2.opts.Tools[0].Function.Name != "bash" {
+		t.Fatalf("修改会话 1 选项污染了会话 2: %+v", s2.opts)
+	}
+}
+
+func TestSessionStateSetToolsEnabled(t *testing.T) {
+	s := &sessionState{}
+	defaults := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
+
+	// 无默认工具时开启仍保持为空
+	s.setToolsEnabled(true, nil)
+	if len(s.opts.Tools) != 0 {
+		t.Fatal("默认工具为空时不应启用工具")
+	}
+
+	// 开启工具从 defaults 拷贝，关闭后置空，再次开启能恢复
+	s.setToolsEnabled(true, defaults)
+	if len(s.opts.Tools) != 1 || s.opts.Tools[0].Function.Name != "bash" {
+		t.Fatalf("开启工具后 Tools = %+v", s.opts.Tools)
+	}
+	s.opts.Tools[0].Function.Name = "changed"
+	if defaults[0].Function.Name != "bash" {
+		t.Fatalf("修改会话工具切片污染了 defaults: %+v", defaults)
+	}
+
+	s.setToolsEnabled(false, defaults)
+	if len(s.opts.Tools) != 0 {
+		t.Fatalf("关闭工具后 Tools 应为空，实际 = %+v", s.opts.Tools)
+	}
+	s.setToolsEnabled(true, defaults)
+	if len(s.opts.Tools) != 1 || s.opts.Tools[0].Function.Name != "bash" {
+		t.Fatalf("重新开启工具后未恢复默认定义: %+v", s.opts.Tools)
 	}
 }

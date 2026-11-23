@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,11 +43,18 @@ type bashArgs struct {
 }
 
 func NewAgentLoop(cfg config.Config, db *sql.DB, opts apis.StreamOptions) *AgentLoop {
-	return &AgentLoop{
-		cfg:  cfg,
-		db:   db,
-		opts: opts,
+	l := &AgentLoop{
+		cfg: cfg,
+		db:  db,
 	}
+	l.SetOpts(opts)
+	return l
+}
+
+// 更新会话级 opts
+func (l *AgentLoop) SetOpts(opts apis.StreamOptions) {
+	opts.Tools = slices.Clone(opts.Tools)
+	l.opts = opts
 }
 
 func (l *AgentLoop) NewSession(ctx context.Context, title string) error {
