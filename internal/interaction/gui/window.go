@@ -49,7 +49,9 @@ func (a *app) chat(c *ui.Context) {
 			ui.Text(c, curSessionState.err.Error())
 		}
 		a.scrollChat(c, curSession.Id, chatMsgs) // 对话记录栏
-
+		if curSessionState.confirm != nil {
+			a.renderConfirm(c, curSessionState) // 工具调用确认
+		}
 		ui.TextArea(c, &curSessionState.inputText)        // 输入框
 		a.submitButton(c, curSession.Id, curSessionState) // 发送按钮
 	})
@@ -100,6 +102,25 @@ func (a *app) submitButton(c *ui.Context, sessionId int64, state *sessionState) 
 		}
 		a.submit(sessionId, state.inputText)
 	}
+}
+
+func (a *app) renderConfirm(c *ui.Context, state *sessionState) {
+	if state.confirm == nil {
+		return
+	}
+	confirm := state.confirm
+	ui.Column(c).Children(func() {
+		ui.Text(c, fmt.Sprintf("请求执行命令 (目录: %s)", confirm.dir))
+		ui.Text(c, confirm.command)
+		ui.Row(c).Children(func() {
+			if ui.Button(c, "批准").Clicked() {
+				state.resolveConfirm(true)
+			}
+			if ui.Button(c, "拒绝").Clicked() {
+				state.resolveConfirm(false)
+			}
+		})
+	})
 }
 
 // 加载指定 session
@@ -163,7 +184,30 @@ func (a *app) submit(submitId int64, submitInputText string) {
 	}
 
 	confirmFunc := func(ctx context.Context, dir, command string) (bool, error) {
-		return false, ctx.Err() // TODO: 待实现
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+
+		confirm := &confirmToolCall{
+			dir:     dir,
+			command: command,
+			reply:   make(chan bool, 1),
+		}
+		a.win.Update(func() {
+			submitState.confirm = confirm
+		})
+
+		select {
+		case allow := <-confirm.reply:
+			return allow, nil
+		case <-ctx.Done():
+			a.win.Update(func() {
+				if submitState.confirm == confirm { // 避免误清后续请求
+					submitState.confirm = nil
+				}
+			})
+			return false, ctx.Err()
+		}
 	}
 
 	submitState.sessionRunning = true
@@ -180,6 +224,7 @@ func (a *app) submit(submitId int64, submitInputText string) {
 		a.win.Update(func() {
 			submitState.sessionRunning = false
 			submitState.curReply = nil
+			submitState.confirm = nil
 
 			if err != nil {
 				submitState.err = err
@@ -194,8 +239,11 @@ func Run(ctx context.Context, db *sql.DB, cfg config.Config, opts apis.StreamOpt
 		return err
 	}
 
+	appCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	a := &app{
-		ctx:         ctx,
+		ctx:         appCtx,
+		cancel:      cancel,
 		db:          db,
 		cfg:         cfg,
 		defaultOpts: opts,
@@ -218,6 +266,9 @@ func Run(ctx context.Context, db *sql.DB, cfg config.Config, opts apis.StreamOpt
 			Width:   960,
 			Height:  640,
 			Content: ui.View(a.view),
+		})
+		a.win.OnClosed(func() {
+			a.cancel()
 		})
 	})
 

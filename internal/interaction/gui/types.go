@@ -53,6 +53,7 @@ type sessionState struct {
 	opts           apis.StreamOptions // 会话设置项(Thinking/ReasoningEffort/Tools)
 	messages       []*chatMessage
 	curReply       *chatMessage
+	confirm        *confirmToolCall
 	inputText      string // 提交内容
 	historyLoaded  bool   // 判断会话内容是否已加载
 	sessionRunning bool   // 判断会话是否正在运行
@@ -84,6 +85,24 @@ func (s *sessionState) appendStreamChunk(role agent.OutputRole, chunk string) {
 	case agent.IsContent: // 输出内容
 		s.curReply.Content += chunk
 	}
+}
+
+func (s *sessionState) resolveConfirm(allow bool) {
+	if s.confirm == nil {
+		return
+	}
+	c := s.confirm
+	s.confirm = nil
+	select {
+	case c.reply <- allow:
+	default:
+	}
+}
+
+type confirmToolCall struct {
+	dir     string
+	command string
+	reply   chan bool // 容量为1
 }
 
 // 全会话列表
