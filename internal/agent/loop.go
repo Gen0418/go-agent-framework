@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"go-agent-framework/internal/apis"
 	"go-agent-framework/internal/config"
@@ -126,6 +127,13 @@ func (l *AgentLoop) RunTurn(ctx context.Context, inputFunc InputFunc, outputFunc
 	for needReply { // 读取输出循环
 		output, finishReason, err := l.readReply(ctx, outputFunc)
 		if err != nil {
+			if errors.Is(err, context.Canceled) && output.Role != "" {
+				saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				defer saveCancel()
+				if saveErr := l.appendMessage(saveCtx, output); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
+			}
 			return err
 		}
 
@@ -145,13 +153,19 @@ func (l *AgentLoop) RunTurn(ctx context.Context, inputFunc InputFunc, outputFunc
 			return err
 		}
 
-		for _, call := range output.ToolCalls { // 遍历工具调用结果，追加并储存
+		for i, call := range output.ToolCalls { // 遍历工具调用结果，追加并储存
 			dir, err := os.Getwd()
 			if err != nil {
+				if saveErr := l.cancelRemainingToolCalls(ctx, output.ToolCalls[i:], outputFunc); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
 				return err
 			}
 			toolOutput, err := l.runToolCall(ctx, call, dir, confirmFunc)
 			if err != nil {
+				if saveErr := l.cancelRemainingToolCalls(ctx, output.ToolCalls[i:], outputFunc); saveErr != nil {
+					return errors.Join(err, saveErr)
+				}
 				return err
 			}
 
@@ -171,6 +185,25 @@ func (l *AgentLoop) RunTurn(ctx context.Context, inputFunc InputFunc, outputFunc
 		}
 	}
 
+	return nil
+}
+
+// 取消时补写工具调用结果
+func (l *AgentLoop) cancelRemainingToolCalls(ctx context.Context, calls []apis.ToolCall, outputFunc OutputFunc) error {
+	saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer saveCancel()
+
+	for _, call := range calls {
+		msg := apis.Message{
+			Role:       "tool",
+			Content:    "已取消",
+			ToolCallId: call.Id,
+		}
+		if err := l.appendMessage(saveCtx, msg); err != nil {
+			return err
+		}
+		_ = outputFunc(saveCtx, msg.Content, IsToolContent)
+	}
 	return nil
 }
 
@@ -238,28 +271,48 @@ func (l *AgentLoop) readReply(ctx context.Context, outputFunc OutputFunc) (apis.
 	var finishReason string
 	var reasoning bool
 
+	remainContent := func() apis.Message {
+		if output.Len() == 0 && reasoningOutput.Len() == 0 {
+			return apis.Message{}
+		}
+		return apis.Message{
+			Role:             "assistant",
+			Content:          output.String(),
+			ReasoningContent: reasoningOutput.String(),
+		}
+	}
+
 	// 流式解析SSE
 	for event, err := range apis.StreamChat(ctx, l.msgs, l.opts, l.cfg) { // 解析sse流
 		if err != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return remainContent(), "", ctx.Err()
+			}
 			return apis.Message{}, "", fmt.Errorf("流式对话失败: %w", err)
 		}
 		switch event.Kind {
 		case apis.EventReasoning: // 思考内容
+			if err := outputFunc(ctx, event.Text, IsReasoningContent); err != nil {
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return remainContent(), "", ctx.Err()
+				}
+				return apis.Message{}, "", err
+			}
 			reasoning = true
 			reasoningOutput.WriteString(event.Text)
-			if err := outputFunc(ctx, event.Text, IsReasoningContent); err != nil {
-				return apis.Message{}, "", err
-			}
 		case apis.EventContent: // 输出内容
 			splitMark := ""
-			if reasoning == true {
-				reasoning = false
+			if reasoning {
 				splitMark = "\n"
 			}
-			output.WriteString(event.Text)
 			if err := outputFunc(ctx, splitMark+event.Text, IsContent); err != nil {
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return remainContent(), "", ctx.Err()
+				}
 				return apis.Message{}, "", err
 			}
+			reasoning = false
+			output.WriteString(event.Text)
 		case apis.EventFinish: // 结束原因
 			finishReason = event.FinishReason
 			if event.FinishReason == "tool_calls" {

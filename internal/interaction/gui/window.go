@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -101,6 +102,13 @@ func (a *app) renderMessage(c *ui.Context, msg *chatMessage) {
 }
 
 func (a *app) submitButton(c *ui.Context, sessionId int64, state *sessionState) {
+	if state.sessionRunning {
+		if ui.Button(c, "停止").Clicked() && state.cancel != nil {
+			state.cancel()
+			state.cancel = nil
+		}
+		return
+	}
 	if ui.Button(c, "提交").Clicked() {
 		if strings.TrimSpace(state.inputText) == "" {
 			return
@@ -245,6 +253,8 @@ func (a *app) submit(submitId int64, submitInputText string) {
 		}
 	}
 
+	turnCtx, cancel := context.WithCancel(a.ctx)
+	submitState.cancel = cancel
 	submitState.sessionRunning = true
 	submitState.err = nil
 	submitState.inputText = ""
@@ -254,14 +264,16 @@ func (a *app) submit(submitId int64, submitInputText string) {
 	}) // 追加窗口对话历史
 
 	go func() { // 后台 session 运行
-		err := submitLoop.RunTurn(a.ctx, inputFunc, outputFunc, confirmFunc)
+		defer cancel()
+		err := submitLoop.RunTurn(turnCtx, inputFunc, outputFunc, confirmFunc)
 
 		a.win.Update(func() {
 			submitState.sessionRunning = false
+			submitState.cancel = nil
 			submitState.curReply = nil
 			submitState.confirm = nil
 
-			if err != nil {
+			if err != nil && !errors.Is(err, context.Canceled) {
 				submitState.err = err
 			}
 		})

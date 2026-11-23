@@ -348,10 +348,35 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 	for _, want := range []error{io.EOF, context.Canceled} {
 		t.Run(want.Error(), func(t *testing.T) {
 			user := apis.Message{Role: "user", Content: "调用工具"}
-			loop := newTestLoop(t, exchange{[]apis.Message{user}, callStream + "\n\n" + callFinishEvent + doneEvent})
+			nextUser := apis.Message{Role: "user", Content: "继续聊"}
+			assistantCalls := apis.Message{
+				Role: "assistant",
+				ToolCalls: []apis.ToolCall{
+					{Id: "a", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"cat fixture.txt"}`}},
+					{Id: "b", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"> denied.txt"}`}},
+				},
+			}
+			canceledTools := []apis.Message{
+				{Role: "tool", ToolCallId: "a", Content: "已取消"},
+				{Role: "tool", ToolCallId: "b", Content: "已取消"},
+			}
+			historyAfterCancel := append([]apis.Message{user, assistantCalls}, canceledTools...)
+
+			loop := newTestLoop(
+				t,
+				exchange{[]apis.Message{user}, callStream + "\n\n" + callFinishEvent + doneEvent},
+				exchange{append(historyAfterCancel, nextUser), replyStream},
+			)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			err := loop.RunTurn(ctx, inputOnce(t, user.Content), discardOutput, func(context.Context, string, string) (bool, error) {
+
+			var toolOutputs []string
+			err := loop.RunTurn(ctx, inputOnce(t, user.Content), func(_ context.Context, chunk string, role OutputRole) error {
+				if role == IsToolContent {
+					toolOutputs = append(toolOutputs, chunk)
+				}
+				return nil
+			}, func(context.Context, string, string) (bool, error) {
 				if want == context.Canceled {
 					cancel()
 					return true, nil
@@ -361,12 +386,65 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			if !errors.Is(err, want) {
 				t.Fatalf("返回错误 = %v，预期 %v", err, want)
 			}
-			if len(loop.msgs) != 2 || len(loop.msgs[1].ToolCalls) != 2 {
-				t.Fatalf("中断后的历史 = %+v", loop.msgs)
+			assertHistory(t, loop, historyAfterCancel)
+			if !reflect.DeepEqual(toolOutputs, []string{"已取消", "已取消"}) {
+				t.Fatalf("取消后的工具输出回调 = %+v，预期两条已取消", toolOutputs)
 			}
-			assertHistory(t, loop, []apis.Message{user, loop.msgs[1]})
+
+			// 重新绑定会话并继续下一轮，确认持久化历史合法可续聊
+			reloaded := NewAgentLoop(loop.cfg, loop.db, loop.opts)
+			if err := reloaded.BindSession(t.Context(), loop.SessionId); err != nil {
+				t.Fatal(err)
+			}
+			if err := reloaded.RunTurn(t.Context(), inputOnce(t, nextUser.Content), discardOutput, unexpectedConfirm(t)); err != nil {
+				t.Fatalf("中断后重绑续聊失败: %v", err)
+			}
 		})
 	}
+}
+
+func TestRunTurnStreamCanceled(t *testing.T) {
+	t.Run("取消时保留已输出的部分思考与正文且不带工具调用", func(t *testing.T) {
+		user := apis.Message{Role: "user", Content: "写一段长回复"}
+		partialStream := "data: " + `{"choices":[{"delta":{"reasoning_content":"先想一下"}}]}` + "\n\n" +
+			"data: " + `{"choices":[{"delta":{"content":"前半句"}}]}` + "\n\n" +
+			"data: " + `{"choices":[{"delta":{"content":"后半句"}}]}` + "\n\n" + stopEvent + doneEvent
+
+		loop := newTestLoop(t, exchange{[]apis.Message{user}, partialStream})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		err := loop.RunTurn(ctx, inputOnce(t, user.Content), func(_ context.Context, text string, role OutputRole) error {
+			if role == IsContent && strings.TrimPrefix(text, "\n") == "前半句" {
+				cancel()
+				return nil
+			}
+			return ctx.Err()
+		}, unexpectedConfirm(t))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("返回错误 = %v，预期 context.Canceled", err)
+		}
+		assertHistory(t, loop, []apis.Message{
+			user,
+			{Role: "assistant", ReasoningContent: "先想一下", Content: "前半句"},
+		})
+	})
+
+	t.Run("尚未收到输出即取消不写入空助手消息", func(t *testing.T) {
+		user := apis.Message{Role: "user", Content: "立刻停止"}
+		loop := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		err := loop.RunTurn(ctx, inputOnce(t, user.Content), func(_ context.Context, _ string, _ OutputRole) error {
+			cancel()
+			return ctx.Err()
+		}, unexpectedConfirm(t))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("返回错误 = %v，预期 context.Canceled", err)
+		}
+		assertHistory(t, loop, []apis.Message{user})
+	})
 }
 
 func TestBindSessionContinuesStoredConversation(t *testing.T) {
