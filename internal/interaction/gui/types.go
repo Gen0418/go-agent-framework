@@ -3,6 +3,8 @@ package gui
 import (
 	"context"
 	"database/sql"
+	"slices"
+	"strings"
 
 	"go-agent-framework/internal/agent"
 	"go-agent-framework/internal/apis"
@@ -11,6 +13,9 @@ import (
 
 	"github.com/egoist/mygo"
 )
+
+type scrollKey int64
+type inputKey int64
 
 // GUI应用主体
 type app struct {
@@ -40,6 +45,9 @@ func (a *app) sessionState(id int64) *sessionState {
 }
 
 func (a *app) selectedSessionState() (storage.Session, *sessionState, bool) {
+	if a.sessions.selectedId == 0 {
+		return storage.Session{Id: 0, Title: "新对话"}, a.sessionState(0), true
+	}
 	s, ok := a.sessions.selected()
 	if !ok {
 		return storage.Session{}, nil, false
@@ -120,7 +128,23 @@ func (l *sessionList) selected() (storage.Session, bool) {
 	return storage.Session{}, false
 }
 
+func (l *sessionList) add(s storage.Session) {
+	l.list = slices.Insert(l.list, 0, s)
+}
+
 type chatMessage struct {
 	apis.Message
 	reasoningOpen bool
+}
+
+func makeSessionTitle(text string) string {
+	cleaned := strings.Join(strings.Fields(text), " ")
+	if cleaned == "" {
+		return "新对话"
+	}
+	runes := []rune(cleaned)
+	if len(runes) > 20 {
+		return string(runes[:20]) + "..."
+	}
+	return cleaned
 }

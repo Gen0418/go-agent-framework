@@ -24,6 +24,10 @@ func (a *app) view(c *ui.Context) {
 
 func (a *app) sidebar(c *ui.Context) {
 	ui.Column(c).Width(200).FillHeight().Children(func() {
+		if ui.Button(c, "新建会话").Clicked() {
+			a.sessions.selectedId = 0
+			a.err = nil
+		}
 		for _, session := range a.sessions.list {
 			if ui.Button(c.Key(session.Id), session.Title).Clicked() {
 				_ = a.selectSession(session.Id)
@@ -40,6 +44,7 @@ func (a *app) chat(c *ui.Context) {
 		})
 		return
 	}
+
 	chatMsgs := curSessionState.messages
 
 	ui.Column(c).Grow(1).FillHeight().Children(func() {
@@ -52,13 +57,13 @@ func (a *app) chat(c *ui.Context) {
 		if curSessionState.confirm != nil {
 			a.renderConfirm(c, curSessionState) // 工具调用确认
 		}
-		ui.TextArea(c, &curSessionState.inputText)        // 输入框
-		a.submitButton(c, curSession.Id, curSessionState) // 发送按钮
+		ui.TextArea(c.Key(inputKey(curSession.Id)), &curSessionState.inputText) // 输入框
+		a.submitButton(c, curSession.Id, curSessionState)                       // 发送按钮
 	})
 }
 
 func (a *app) scrollChat(c *ui.Context, sessionId int64, chatMsgs []*chatMessage) {
-	ui.Scroll(c.Key(sessionId)).Grow(1).Children(func() {
+	ui.Scroll(c.Key(scrollKey(sessionId))).Grow(1).Children(func() {
 		for _, chatMsg := range chatMsgs {
 			a.renderMessage(c, chatMsg)
 		}
@@ -97,11 +102,29 @@ func (a *app) renderMessage(c *ui.Context, msg *chatMessage) {
 
 func (a *app) submitButton(c *ui.Context, sessionId int64, state *sessionState) {
 	if ui.Button(c, "提交").Clicked() {
-		if sessionId == 0 || strings.TrimSpace(state.inputText) == "" {
+		if strings.TrimSpace(state.inputText) == "" {
 			return
 		}
 		a.submit(sessionId, state.inputText)
 	}
+}
+
+func (a *app) lazyCreateSession(input string) (int64, error) {
+	title := makeSessionTitle(input)
+	id, err := storage.CreateSession(a.ctx, a.db, title)
+	if err != nil {
+		return 0, fmt.Errorf("新建会话失败: %w", err)
+	}
+
+	curSession := a.sessionState(0)
+	delete(a.sessionStates, 0)
+	curSession.historyLoaded = true
+	curSession.err = nil
+	a.sessionStates[id] = curSession
+
+	a.sessions.add(storage.Session{Id: id, Title: title})
+	a.sessions.selectedId = id
+	return id, nil
 }
 
 func (a *app) renderConfirm(c *ui.Context, state *sessionState) {
@@ -125,6 +148,10 @@ func (a *app) renderConfirm(c *ui.Context, state *sessionState) {
 
 // 加载指定 session
 func (a *app) selectSession(selectedId int64) error {
+	if selectedId == 0 {
+		a.sessions.selectedId = 0
+		return nil
+	}
 	a.sessions.selectedId = selectedId
 	state := a.sessionState(selectedId)
 
@@ -149,6 +176,14 @@ func (a *app) selectSession(selectedId int64) error {
 }
 
 func (a *app) submit(submitId int64, submitInputText string) {
+	if submitId == 0 {
+		newId, err := a.lazyCreateSession(submitInputText)
+		if err != nil {
+			a.sessionState(0).err = err
+			return
+		}
+		submitId = newId
+	}
 	submitState := a.sessionState(submitId)
 	if submitState.sessionRunning {
 		return
