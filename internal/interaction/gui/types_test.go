@@ -51,6 +51,61 @@ func TestSessionListAddAndSelected(t *testing.T) {
 	}
 }
 
+func TestSessionListRenameAndRemove(t *testing.T) {
+	list := sessionList{
+		list: []storage.Session{
+			{Id: 3, Title: "会话3"},
+			{Id: 2, Title: "会话2"},
+			{Id: 1, Title: "会话1"},
+		},
+		selectedId: 2,
+	}
+
+	// 重命名已存在和不存在的会话
+	if !list.rename(2, "已改名") || list.list[1].Title != "已改名" {
+		t.Fatalf("rename 后列表 = %+v", list.list)
+	}
+	if list.rename(99, "无效") {
+		t.Fatal("重命名不存在的会话应返回 false")
+	}
+
+	// 删除非当前选中会话，保持 selectedId 不变
+	nextId, ok := list.remove(3)
+	if !ok || nextId != 2 || list.selectedId != 2 || len(list.list) != 2 {
+		t.Fatalf("删除非选中项后 nextId=%d, ok=%v, list=%+v", nextId, ok, list.list)
+	}
+
+	// 删除不存在的会话
+	if nextId, ok := list.remove(99); ok || nextId != 2 {
+		t.Fatalf("删除不存在会话返回 nextId=%d, ok=%v", nextId, ok)
+	}
+
+	// 删除当前选中项（非末尾）时落到原位置的下一个会话
+	nextId, ok = list.remove(2)
+	if !ok || nextId != 1 || list.selectedId != 1 {
+		t.Fatalf("删除当前选中项后 nextId=%d, ok=%v, selectedId=%d", nextId, ok, list.selectedId)
+	}
+
+	// 删除最后一个会话时回退到 0（新对话草稿态）
+	nextId, ok = list.remove(1)
+	if !ok || nextId != 0 || list.selectedId != 0 || len(list.list) != 0 {
+		t.Fatalf("清空列表后 nextId=%d, ok=%v, list=%+v", nextId, ok, list.list)
+	}
+
+	// 删除末尾选中项时回退到前一项
+	tailList := sessionList{
+		list: []storage.Session{
+			{Id: 10, Title: "A"},
+			{Id: 20, Title: "B"},
+		},
+		selectedId: 20,
+	}
+	nextId, ok = tailList.remove(20)
+	if !ok || nextId != 10 || tailList.selectedId != 10 {
+		t.Fatalf("删除末尾选中项后 nextId=%d, ok=%v, selectedId=%d", nextId, ok, tailList.selectedId)
+	}
+}
+
 func TestSessionStateAppendStreamChunk(t *testing.T) {
 	s := &sessionState{}
 

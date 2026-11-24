@@ -24,6 +24,8 @@ func (a *app) view(c *ui.Context) {
 		a.sidebar(c)
 		a.chat(c)
 	})
+	a.renameModal(c)
+	a.deleteModal(c)
 }
 
 func (a *app) sidebar(c *ui.Context) {
@@ -33,10 +35,80 @@ func (a *app) sidebar(c *ui.Context) {
 			a.err = nil
 		}
 		for _, session := range a.sessions.list {
-			if ui.Button(c.Key(session.Id), session.Title).Clicked() {
-				_ = a.selectSession(session.Id)
-			}
+			ui.Row(c.Key(session.Id)).FillWidth().Children(func() {
+				if ui.Button(c, session.Title).Grow(1).Clicked() {
+					_ = a.selectSession(session.Id)
+				}
+				ui.PopoverMenuButton(c, "...", func(m *ui.Menu) {
+					if m.Item("重命名").Chosen() {
+						a.renameDialog = renameDialog{
+							open:      true,
+							sessionId: session.Id,
+							title:     session.Title,
+						}
+					}
+					if m.Item("删除").Chosen() {
+						a.deleteDialog = deleteDialog{
+							open:      true,
+							sessionId: session.Id,
+							title:     session.Title,
+						}
+					}
+				}).Label(fmt.Sprintf("更多操作 %d", session.Id))
+			})
 		}
+	})
+}
+
+func (a *app) renameModal(c *ui.Context) {
+	ui.Modal(c, &a.renameDialog.open, func() {
+		ui.Column(c).Children(func() {
+			ui.Text(c, "重命名会话")
+			submitted := ui.TextInput(c.Key(a.renameDialog.sessionId), &a.renameDialog.title).Submitted()
+			if a.renameDialog.err != nil {
+				ui.Text(c, a.renameDialog.err.Error())
+			}
+			ui.Row(c).Children(func() {
+				if ui.Button(c, "取消").Clicked() {
+					a.renameDialog.open = false
+					a.renameDialog.err = nil
+				}
+				if ui.Button(c, "保存").Clicked() || submitted {
+					if err := a.renameSession(a.renameDialog.sessionId, a.renameDialog.title); err != nil {
+						a.renameDialog.err = err
+						return
+					}
+					a.renameDialog.open = false
+					a.renameDialog.err = nil
+				}
+			})
+		})
+	})
+}
+
+func (a *app) deleteModal(c *ui.Context) {
+	ui.Modal(c, &a.deleteDialog.open, func() {
+		ui.Column(c).Children(func() {
+			ui.Text(c, "删除会话")
+			ui.Text(c, fmt.Sprintf("确定删除“%s”吗？", a.deleteDialog.title))
+			if a.deleteDialog.err != nil {
+				ui.Text(c, a.deleteDialog.err.Error())
+			}
+			ui.Row(c).Children(func() {
+				if ui.Button(c, "取消").Clicked() {
+					a.deleteDialog.open = false
+					a.deleteDialog.err = nil
+				}
+				if ui.Button(c, "确认删除").Clicked() {
+					if err := a.deleteSession(a.deleteDialog.sessionId); err != nil {
+						a.deleteDialog.err = err
+						return
+					}
+					a.deleteDialog.open = false
+					a.deleteDialog.err = nil
+				}
+			})
+		})
 	})
 }
 
@@ -218,6 +290,49 @@ func (a *app) selectSession(selectedId int64) error {
 		state.err = nil
 	}
 
+	return nil
+}
+
+// 重命名指定会话
+func (a *app) renameSession(sessionId int64, title string) error {
+	cleaned := strings.Join(strings.Fields(title), " ")
+	if cleaned == "" {
+		return errors.New("会话标题不能为空")
+	}
+
+	if err := storage.UpdateSessionTitle(a.ctx, a.db, sessionId, cleaned); err != nil {
+		return fmt.Errorf("重命名会话失败: %w", err)
+	}
+
+	a.sessions.rename(sessionId, cleaned)
+	a.err = nil
+	return nil
+}
+
+// 删除指定会话
+// 若正在运行则先取消，再清理数据库与内存状态
+func (a *app) deleteSession(sessionId int64) error {
+	if state, ok := a.sessionStates[sessionId]; ok {
+		if state.cancel != nil {
+			state.cancel()
+			state.cancel = nil
+		}
+		state.resolveConfirm(false)
+	}
+
+	if err := storage.DeleteSession(a.ctx, a.db, sessionId); err != nil {
+		a.err = fmt.Errorf("删除会话失败: %w", err)
+		return a.err
+	}
+
+	prevSelectedId := a.sessions.selectedId
+	delete(a.sessionStates, sessionId)
+	nextId, _ := a.sessions.remove(sessionId)
+	a.err = nil
+
+	if nextId != prevSelectedId {
+		return a.selectSession(nextId)
+	}
 	return nil
 }
 

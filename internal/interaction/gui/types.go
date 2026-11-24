@@ -31,6 +31,8 @@ type app struct {
 	sessions      sessionList
 	sessionStates map[int64]*sessionState // sessionId -> sessionState
 	optsOpen      bool                    // 会话选项浮层是否展开
+	renameDialog  renameDialog            // 重命名弹框状态
+	deleteDialog  deleteDialog            // 删除确认弹框状态
 
 	// 应用级错误
 	err error
@@ -127,23 +129,74 @@ type confirmToolCall struct {
 	reply   chan bool // 容量为1
 }
 
+type renameDialog struct {
+	open      bool
+	sessionId int64
+	title     string
+	err       error
+}
+
+type deleteDialog struct {
+	open      bool
+	sessionId int64
+	title     string
+	err       error
+}
+
 // 全会话列表
 type sessionList struct {
 	list       []storage.Session // 全部会话列表
 	selectedId int64             // 当前选中会话
 }
 
+func (l *sessionList) indexOf(id int64) int {
+	return slices.IndexFunc(l.list, func(s storage.Session) bool {
+		return s.Id == id
+	})
+}
+
 func (l *sessionList) selected() (storage.Session, bool) {
-	for _, s := range l.list {
-		if s.Id == l.selectedId {
-			return s, true
-		}
+	idx := l.indexOf(l.selectedId)
+	if idx < 0 {
+		return storage.Session{}, false
 	}
-	return storage.Session{}, false
+	return l.list[idx], true
 }
 
 func (l *sessionList) add(s storage.Session) {
 	l.list = slices.Insert(l.list, 0, s)
+}
+
+func (l *sessionList) rename(id int64, title string) bool {
+	idx := l.indexOf(id)
+	if idx < 0 {
+		return false
+	}
+	l.list[idx].Title = title
+	return true
+}
+
+// 删除指定会话
+// 若删的是当前选中项，则回退到相邻会话或新对话
+func (l *sessionList) remove(id int64) (int64, bool) {
+	idx := l.indexOf(id)
+	if idx < 0 {
+		return l.selectedId, false
+	}
+
+	l.list = slices.Delete(l.list, idx, idx+1)
+	if l.selectedId != id {
+		return l.selectedId, true
+	}
+
+	if len(l.list) == 0 {
+		l.selectedId = 0
+	} else if idx < len(l.list) {
+		l.selectedId = l.list[idx].Id
+	} else {
+		l.selectedId = l.list[len(l.list)-1].Id
+	}
+	return l.selectedId, true
 }
 
 type chatMessage struct {

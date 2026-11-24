@@ -16,6 +16,61 @@ func CreateSession(ctx context.Context, db *sql.DB, title string) (int64, error)
 	return res.LastInsertId()
 }
 
+// 更新 sessions 标题
+func UpdateSessionTitle(ctx context.Context, db *sql.DB, sessionId int64, title string) error {
+	res, err := db.ExecContext(
+		ctx,
+		`UPDATE sessions SET title = ? WHERE id = ?;`,
+		title,
+		sessionId,
+	)
+	if err != nil {
+		return fmt.Errorf("更新 sessions 标题失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("更新 sessions 标题失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("会话 %d 不存在: %w", sessionId, sql.ErrNoRows)
+	}
+
+	return nil
+}
+
+// 删除 sessions 记录及其关联的 messages 和 api_calls
+func DeleteSession(ctx context.Context, db *sql.DB, sessionId int64) error {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("删除 sessions 失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_id = ?;`, sessionId); err != nil {
+		return fmt.Errorf("删除 sessions 失败: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM api_calls WHERE session_id = ?;`, sessionId); err != nil {
+		return fmt.Errorf("删除 sessions 失败: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?;`, sessionId)
+	if err != nil {
+		return fmt.Errorf("删除 sessions 失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("删除 sessions 失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("会话 %d 不存在: %w", sessionId, sql.ErrNoRows)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("删除 sessions 失败: %w", err)
+	}
+
+	return nil
+}
+
 // 创建 messages 记录
 func CreateMessage(ctx context.Context, db *sql.DB, msg Message) error {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{})

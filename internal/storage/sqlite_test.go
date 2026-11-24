@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -205,6 +206,102 @@ func TestCreateMessageRollsBackForMissingSession(t *testing.T) {
 	}
 
 	assertMessages(t, db, missingSessionID, nil)
+}
+
+func TestUpdateSessionTitle(t *testing.T) {
+	db := openTestDB(t, ":memory:")
+	firstID := createTestSession(t, db, "旧标题")
+	secondID := createTestSession(t, db, "另一会话")
+
+	if err := storage.UpdateSessionTitle(t.Context(), db, firstID, "新标题"); err != nil {
+		t.Fatal(err)
+	}
+
+	gotFirst, err := storage.QuerySession(t.Context(), db, firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFirst != "新标题" {
+		t.Fatalf("更新后标题 = %q，预期 新标题", gotFirst)
+	}
+
+	// 不影响其他会话
+	gotSecond, err := storage.QuerySession(t.Context(), db, secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSecond != "另一会话" {
+		t.Fatalf("其他会话标题被误改: %q", gotSecond)
+	}
+
+	// 不存在的会话返回 sql.ErrNoRows
+	err = storage.UpdateSessionTitle(t.Context(), db, 9999, "不存在")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("更新不存在会话返回错误 = %v，预期包装 sql.ErrNoRows", err)
+	}
+}
+
+func TestDeleteSession(t *testing.T) {
+	db := openTestDB(t, ":memory:")
+	targetID := createTestSession(t, db, "待删除会话")
+	keepID := createTestSession(t, db, "保留会话")
+
+	for _, sid := range []int64{targetID, keepID} {
+		if err := storage.CreateMessage(t.Context(), db, storage.Message{
+			SessionId: sid,
+			Role:      "user",
+			Content:   "测试消息",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(t.Context(),
+			`INSERT INTO api_calls (session_id, model) VALUES (?, ?)`, sid, "deepseek-chat",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := storage.DeleteSession(t.Context(), db, targetID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 目标会话及其关联消息、api_calls 均应清理干净
+	if _, err := storage.QuerySession(t.Context(), db, targetID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("删除后查询目标会话返回 = %v，预期 sql.ErrNoRows", err)
+	}
+	assertMessages(t, db, targetID, nil)
+	var targetCalls int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM api_calls WHERE session_id = ?`, targetID,
+	).Scan(&targetCalls); err != nil {
+		t.Fatal(err)
+	}
+	if targetCalls != 0 {
+		t.Fatalf("目标会话残留 %d 条 api_calls，预期 0", targetCalls)
+	}
+
+	// 其他会话的数据保持完整
+	gotKeepTitle, err := storage.QuerySession(t.Context(), db, keepID)
+	if err != nil || gotKeepTitle != "保留会话" {
+		t.Fatalf("保留会话标题 = %q, err = %v", gotKeepTitle, err)
+	}
+	assertMessages(t, db, keepID, []storage.Message{
+		{SessionId: keepID, Role: "user", Content: "测试消息", ToolCalls: "[]"},
+	})
+	var keepCalls int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT count(*) FROM api_calls WHERE session_id = ?`, keepID,
+	).Scan(&keepCalls); err != nil {
+		t.Fatal(err)
+	}
+	if keepCalls != 1 {
+		t.Fatalf("保留会话 api_calls 数量 = %d，预期 1", keepCalls)
+	}
+
+	// 重复删除或不存在的会话返回 sql.ErrNoRows
+	if err := storage.DeleteSession(t.Context(), db, targetID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("重复删除返回错误 = %v，预期包装 sql.ErrNoRows", err)
+	}
 }
 
 func openTestDB(t *testing.T, path string) *sql.DB {
