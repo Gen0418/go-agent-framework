@@ -87,3 +87,70 @@ func TestNewConfigFromEnvBadDotenv(t *testing.T) {
 		t.Errorf("错误应说明是 .env 解析问题: %v", err)
 	}
 }
+
+func TestLoadAndSave(t *testing.T) {
+	t.Run("无配置文件且无环境变量时允许空 Key 并补默认值", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("DEEPSEEK_API_KEY", "")
+		t.Setenv("DEEPSEEK_ENDPOINT", "")
+
+		path := filepath.Join(t.TempDir(), "SAISON", "config.json")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load 意外失败: %v", err)
+		}
+		if cfg.APIKey != "" || cfg.Endpoint != defaultEndpoint || cfg.DefaultModel != defaultModel {
+			t.Fatalf("Load 结果 = %+v，预期空 Key 与默认 Endpoint/Model", cfg)
+		}
+	})
+
+	t.Run("Save 写入 0600 文件且 Load 优先于环境变量", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("DEEPSEEK_API_KEY", "sk-env")
+		t.Setenv("DEEPSEEK_ENDPOINT", "http://env-endpoint")
+
+		path := filepath.Join(t.TempDir(), "SAISON", "config.json")
+		want := Config{
+			APIKey:       "sk-file",
+			Endpoint:     "http://file-endpoint",
+			DefaultModel: "deepseek-reasoner",
+		}
+		if err := Save(path, Config{
+			APIKey:       "  sk-file  ",
+			Endpoint:     " http://file-endpoint ",
+			DefaultModel: " deepseek-reasoner ",
+		}); err != nil {
+			t.Fatalf("Save 失败: %v", err)
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("配置文件权限 = %o，预期 600", perm)
+		}
+
+		got, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load 失败: %v", err)
+		}
+		if got != want {
+			t.Fatalf("Load = %+v，预期 %+v", got, want)
+		}
+	})
+
+	t.Run("配置文件 JSON 损坏时报错", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		t.Setenv("DEEPSEEK_API_KEY", "")
+		t.Setenv("DEEPSEEK_ENDPOINT", "")
+
+		path := filepath.Join(t.TempDir(), "bad.json")
+		if err := os.WriteFile(path, []byte("{bad"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatal("损坏的 JSON 配置文件应返回错误")
+		}
+	})
+}

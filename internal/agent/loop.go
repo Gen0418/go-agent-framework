@@ -57,6 +57,11 @@ func (l *AgentLoop) SetOpts(opts apis.StreamOptions) {
 	l.opts = opts
 }
 
+// 更新应用级 cfg
+func (l *AgentLoop) SetConfig(cfg config.Config) {
+	l.cfg = cfg
+}
+
 func (l *AgentLoop) NewSession(ctx context.Context, title string) error {
 	sessionId, err := storage.CreateSession(ctx, l.db, title)
 	if err != nil {

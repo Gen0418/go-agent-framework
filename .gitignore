@@ -12,6 +12,8 @@ coverage.out
 .env.*
 !.env.example
 !.env.*.example
+config.json
+.config-*.tmp
 *.txt
 .DS_Store
 

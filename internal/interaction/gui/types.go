@@ -24,15 +24,17 @@ type app struct {
 	cancel      context.CancelFunc
 	db          *sql.DB
 	win         *mygo.Window
-	cfg         config.Config      // 应用级配置项(APIKey/Endpoint)
+	cfg         config.Config      // 应用级配置项(APIKey/Endpoint/DefaultModel)
+	cfgPath     string             // 本地配置文件路径
 	defaultOpts apis.StreamOptions // 默认会话设置(Thinking/ReasoningEffort/Tools)
 
 	// 会话级信息
-	sessions      sessionList
-	sessionStates map[int64]*sessionState // sessionId -> sessionState
-	optsOpen      bool                    // 会话选项浮层是否展开
-	renameDialog  renameDialog            // 重命名弹框状态
-	deleteDialog  deleteDialog            // 删除确认弹框状态
+	sessions       sessionList
+	sessionStates  map[int64]*sessionState // sessionId -> sessionState
+	optsOpen       bool                    // 会话选项浮层是否展开
+	renameDialog   renameDialog            // 重命名弹框状态
+	deleteDialog   deleteDialog            // 删除确认弹框状态
+	settingsDialog settingsDialog          // 应用设置弹框状态
 
 	// 应用级错误
 	err error
@@ -141,6 +143,13 @@ type deleteDialog struct {
 	sessionId int64
 	title     string
 	err       error
+}
+
+type settingsDialog struct {
+	open    bool
+	cfg     config.Config
+	showKey bool
+	err     error
 }
 
 // 全会话列表

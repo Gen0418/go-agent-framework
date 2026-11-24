@@ -13,7 +13,8 @@ import (
 
 func main() {
 	ctx := context.Background()
-	cfg, err := config.NewConfigFromEnv()
+	const cfgPath = "config.json"
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := gui.Run(ctx, db, cfg, opts); err != nil {
+	if err := gui.Run(ctx, db, cfg, cfgPath, opts); err != nil {
 		log.Fatal(err)
 	}
 }

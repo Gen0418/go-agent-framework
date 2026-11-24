@@ -647,3 +647,71 @@ func TestSetOptsAppliesToNextTurn(t *testing.T) {
 		t.Fatalf("第三轮请求选项不符: %+v", gotReqs[2])
 	}
 }
+
+func TestSetConfigAppliesToNextTurn(t *testing.T) {
+	type captured struct {
+		auth  string
+		model string
+	}
+
+	makeServer := func(out *[]captured) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Model string `json:"model"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				http.Error(w, "请求格式错误", http.StatusBadRequest)
+				return
+			}
+			*out = append(*out, captured{
+				auth:  r.Header.Get("Authorization"),
+				model: body.Model,
+			})
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, replyStream)
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+
+	var firstGot, secondGot []captured
+	server1 := makeServer(&firstGot)
+	server2 := makeServer(&secondGot)
+
+	db, err := storage.Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	loop := NewAgentLoop(config.Config{
+		APIKey:       "key-1",
+		Endpoint:     server1.URL,
+		DefaultModel: "model-1",
+	}, db, apis.StreamOptions{})
+	if err := loop.NewSession(t.Context(), "配置切换测试"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loop.RunTurn(t.Context(), inputOnce(t, "第一轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 切换配置后，第二轮应请求新的 Endpoint、APIKey 和 DefaultModel
+	loop.SetConfig(config.Config{
+		APIKey:       "key-2",
+		Endpoint:     server2.URL,
+		DefaultModel: "model-2",
+	})
+	if err := loop.RunTurn(t.Context(), inputOnce(t, "第二轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(firstGot) != 1 || firstGot[0].auth != "Bearer key-1" || firstGot[0].model != "model-1" {
+		t.Fatalf("第一轮配置未生效: %+v", firstGot)
+	}
+	if len(secondGot) != 1 || secondGot[0].auth != "Bearer key-2" || secondGot[0].model != "model-2" {
+		t.Fatalf("第二轮新配置未生效: %+v", secondGot)
+	}
+}

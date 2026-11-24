@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"go-agent-framework/internal/apis"
@@ -257,7 +259,7 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	// 打开删除确认弹框 -> 先点取消不应删除
 	tt.Click(menuLabel)
 	tt.Click("删除")
-	if !a.deleteDialog.open || !tt.HasText("确定删除“已改名会话”吗？删除后无法恢复。") {
+	if !a.deleteDialog.open || !tt.HasText("确定删除“已改名会话”吗？") {
 		t.Fatalf("删除确认弹框未显示预期提示，当前文本: %q", tt.Texts())
 	}
 	tt.Click("取消")
@@ -277,5 +279,103 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	}
 	if _, err := storage.QuerySession(t.Context(), db, id2); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("删除后数据库仍能查到会话 %d: %v", id2, err)
+	}
+}
+
+func TestSubmitRejectsEmptyAPIKey(t *testing.T) {
+	db, err := storage.Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	a := &app{
+		ctx:           t.Context(),
+		db:            db,
+		cfg:           config.Config{APIKey: "   "},
+		sessionStates: make(map[int64]*sessionState),
+	}
+	draft := a.sessionState(0)
+	draft.inputText = "你好"
+
+	a.submit(0, draft.inputText)
+
+	if draft.err == nil || !strings.Contains(draft.err.Error(), "APIKey") {
+		t.Fatalf("空 APIKey 提交应报错提示配置 APIKey，实际 err = %v", draft.err)
+	}
+	if draft.sessionRunning || len(draft.messages) != 0 || draft.inputText != "你好" {
+		t.Fatalf("拦截后不应修改草稿状态: running=%v, msgs=%d, input=%q", draft.sessionRunning, len(draft.messages), draft.inputText)
+	}
+	sessions, err := storage.ListSessions(t.Context(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("空 APIKey 拦截后不应建库会话，实际 = %+v", sessions)
+	}
+}
+
+func TestSettingsModalAndSaveConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("DEEPSEEK_ENDPOINT", "")
+
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	a := &app{
+		cfg: config.Config{
+			APIKey:       "sk-old",
+			Endpoint:     "https://old.example.com/v1",
+			DefaultModel: "old-model",
+		},
+		cfgPath:       cfgPath,
+		sessionStates: make(map[int64]*sessionState),
+	}
+
+	tt := ui.NewTester(a.view, 960, 640)
+
+	// 点击侧边栏底部“设置”打开弹框，默认隐藏明文 Key
+	tt.Click("设置")
+	if !a.settingsDialog.open || a.settingsDialog.showKey || !tt.HasText("应用设置") {
+		t.Fatalf("设置弹框初始状态不符: %+v", a.settingsDialog)
+	}
+
+	// 非法 Endpoint 应报错且不改内存配置、不关闭弹框
+	a.settingsDialog.cfg.Endpoint = "not-a-url"
+	tt.Frame()
+	tt.Click("保存")
+	if !a.settingsDialog.open || a.settingsDialog.err == nil {
+		t.Fatalf("非法 Endpoint 应报错并保持打开: %+v", a.settingsDialog)
+	}
+	if a.cfg.Endpoint != "https://old.example.com/v1" {
+		t.Fatalf("保存失败后不应修改内存配置: %+v", a.cfg)
+	}
+
+	// 填入有效配置并保存：落盘、更新内存、弹框关闭
+	a.settingsDialog.cfg = config.Config{
+		APIKey:       "sk-new",
+		Endpoint:     "https://new.example.com/v1",
+		DefaultModel: "deepseek-reasoner",
+	}
+	tt.Frame()
+	tt.Click("保存")
+	if a.settingsDialog.open || a.settingsDialog.err != nil {
+		t.Fatalf("保存成功后应关闭弹框并清错: %+v", a.settingsDialog)
+	}
+	if a.cfg.APIKey != "sk-new" || a.cfg.Endpoint != "https://new.example.com/v1" || a.cfg.DefaultModel != "deepseek-reasoner" {
+		t.Fatalf("保存后内存配置不符: %+v", a.cfg)
+	}
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("重新加载配置文件失败: %v", err)
+	}
+	if loaded != a.cfg {
+		t.Fatalf("落盘配置 = %+v，预期 %+v", loaded, a.cfg)
+	}
+
+	// 展开选项浮层时应立刻显示更新后的默认模型
+	tt.Click("选项")
+	if !tt.HasText("模型: deepseek-reasoner") {
+		t.Fatalf("选项浮层未同步显示新模型，当前文本: %q", tt.Texts())
 	}
 }

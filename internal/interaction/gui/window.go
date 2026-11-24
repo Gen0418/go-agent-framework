@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -26,6 +27,7 @@ func (a *app) view(c *ui.Context) {
 	})
 	a.renameModal(c)
 	a.deleteModal(c)
+	a.settingsModal(c)
 }
 
 func (a *app) sidebar(c *ui.Context) {
@@ -34,28 +36,36 @@ func (a *app) sidebar(c *ui.Context) {
 			a.sessions.selectedId = 0
 			a.err = nil
 		}
-		for _, session := range a.sessions.list {
-			ui.Row(c.Key(session.Id)).FillWidth().Children(func() {
-				if ui.Button(c, session.Title).Grow(1).Clicked() {
-					_ = a.selectSession(session.Id)
-				}
-				ui.PopoverMenuButton(c, "...", func(m *ui.Menu) {
-					if m.Item("重命名").Chosen() {
-						a.renameDialog = renameDialog{
-							open:      true,
-							sessionId: session.Id,
-							title:     session.Title,
-						}
+		ui.Scroll(c).Grow(1).FillWidth().Children(func() {
+			for _, session := range a.sessions.list {
+				ui.Row(c.Key(session.Id)).FillWidth().Children(func() {
+					if ui.Button(c, session.Title).Grow(1).Clicked() {
+						_ = a.selectSession(session.Id)
 					}
-					if m.Item("删除").Chosen() {
-						a.deleteDialog = deleteDialog{
-							open:      true,
-							sessionId: session.Id,
-							title:     session.Title,
+					ui.PopoverMenuButton(c, "...", func(m *ui.Menu) {
+						if m.Item("重命名").Chosen() {
+							a.renameDialog = renameDialog{
+								open:      true,
+								sessionId: session.Id,
+								title:     session.Title,
+							}
 						}
-					}
-				}).Label(fmt.Sprintf("更多操作 %d", session.Id))
-			})
+						if m.Item("删除").Chosen() {
+							a.deleteDialog = deleteDialog{
+								open:      true,
+								sessionId: session.Id,
+								title:     session.Title,
+							}
+						}
+					}).Label(fmt.Sprintf("更多操作 %d", session.Id))
+				})
+			}
+		})
+		if ui.Button(c, "设置").Clicked() {
+			a.settingsDialog = settingsDialog{
+				open: true,
+				cfg:  a.cfg,
+			}
 		}
 	})
 }
@@ -106,6 +116,46 @@ func (a *app) deleteModal(c *ui.Context) {
 					}
 					a.deleteDialog.open = false
 					a.deleteDialog.err = nil
+				}
+			})
+		})
+	})
+}
+
+func (a *app) settingsModal(c *ui.Context) {
+	ui.Modal(c, &a.settingsDialog.open, func() {
+		ui.Column(c).Children(func() {
+			ui.Text(c, "应用设置")
+
+			ui.Text(c, "APIKey")
+			keyInput := ui.TextInput(c, &a.settingsDialog.cfg.APIKey).Placeholder("sk-...")
+			if !a.settingsDialog.showKey {
+				keyInput.Password()
+			}
+			ui.Checkbox(c, &a.settingsDialog.showKey, "显示 APIKey")
+
+			ui.Text(c, "Endpoint")
+			ui.TextInput(c, &a.settingsDialog.cfg.Endpoint)
+
+			ui.Text(c, "默认模型")
+			ui.TextInput(c, &a.settingsDialog.cfg.DefaultModel)
+
+			if a.settingsDialog.err != nil {
+				ui.Text(c, a.settingsDialog.err.Error())
+			}
+
+			ui.Row(c).Children(func() {
+				if ui.Button(c, "取消").Clicked() {
+					a.settingsDialog.open = false
+					a.settingsDialog.err = nil
+				}
+				if ui.Button(c, "保存").Clicked() {
+					if err := a.saveConfig(a.settingsDialog.cfg); err != nil {
+						a.settingsDialog.err = err
+						return
+					}
+					a.settingsDialog.open = false
+					a.settingsDialog.err = nil
 				}
 			})
 		})
@@ -336,7 +386,27 @@ func (a *app) deleteSession(sessionId int64) error {
 	return nil
 }
 
+// 校验并保存应用级配置
+func (a *app) saveConfig(cfg config.Config) error {
+	normalized := cfg.WithDefaults()
+	parsed, err := url.Parse(normalized.Endpoint)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("Endpoint 必须是有效的 http 或 https 地址")
+	}
+
+	if err := config.Save(a.cfgPath, normalized); err != nil {
+		return err
+	}
+	a.cfg = normalized
+	return nil
+}
+
 func (a *app) submit(submitId int64, submitInputText string) {
+	if strings.TrimSpace(a.cfg.APIKey) == "" {
+		a.sessionState(submitId).err = errors.New("请先在设置中配置 APIKey")
+		return
+	}
+
 	if submitId == 0 {
 		newId, err := a.lazyCreateSession(submitInputText)
 		if err != nil {
@@ -359,7 +429,8 @@ func (a *app) submit(submitId int64, submitInputText string) {
 		}
 		submitState.loop = submitLoop
 	} else {
-		submitLoop.SetOpts(submitState.opts) // 同步最新会话选项给已有 loop
+		submitLoop.SetConfig(a.cfg)
+		submitLoop.SetOpts(submitState.opts) // 同步最新配置与会话选项给已有 loop
 	}
 
 	inputFunc := func(ctx context.Context) (string, error) {
@@ -435,7 +506,7 @@ func (a *app) submit(submitId int64, submitInputText string) {
 	}()
 }
 
-func Run(ctx context.Context, db *sql.DB, cfg config.Config, opts apis.StreamOptions) error {
+func Run(ctx context.Context, db *sql.DB, cfg config.Config, cfgPath string, opts apis.StreamOptions) error {
 	sessions, err := storage.ListSessions(ctx, db)
 	if err != nil {
 		return err
@@ -448,6 +519,7 @@ func Run(ctx context.Context, db *sql.DB, cfg config.Config, opts apis.StreamOpt
 		cancel:      cancel,
 		db:          db,
 		cfg:         cfg,
+		cfgPath:     cfgPath,
 		defaultOpts: opts,
 
 		sessions: sessionList{
