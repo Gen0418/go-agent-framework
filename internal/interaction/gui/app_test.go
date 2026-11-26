@@ -385,6 +385,200 @@ func TestSettingsModalAndSaveConfig(t *testing.T) {
 	}
 }
 
+func TestSidebarCollapseAndChatHeader(t *testing.T) {
+	a := &app{
+		cfg: config.Config{DefaultModel: "deepseek-chat"},
+		sessions: sessionList{
+			list: []storage.Session{
+				{ID: 1, Title: "会话1"},
+				{ID: 2, Title: "会话2"},
+			},
+			selectedID: 1,
+		},
+		sessionStates: map[int64]*sessionState{
+			1: {err: errors.New("网络超时")},
+			2: {
+				running: true,
+				confirm: &confirmToolCall{dir: "/tmp", command: "ls", reply: make(chan bool, 1)},
+			},
+		},
+	}
+
+	tt := ui.NewTester(a.view, 1040, 700)
+
+	// 默认展开侧边栏，显示品牌副标题、待确认状态标识、顶栏模型名、空态提示与错误横幅
+	if !tt.HasText("Ready to use, free to brew.") {
+		t.Fatalf("侧边栏未显示品牌副标题，当前文本: %q", tt.Texts())
+	}
+	if !tt.HasText("待确认") {
+		t.Fatalf("侧边栏未显示待确认标识，当前文本: %q", tt.Texts())
+	}
+	if !tt.HasText("deepseek-chat") || !tt.HasText("输入消息开始新对话，或从左侧切换已有会话") {
+		t.Fatalf("聊天区顶栏或空态文案缺失，当前文本: %q", tt.Texts())
+	}
+	if !tt.HasText("网络超时") {
+		t.Fatalf("未展示错误横幅，当前文本: %q", tt.Texts())
+	}
+
+	// 关闭错误横幅应清空当前会话错误
+	tt.Click("关闭错误提示")
+	if a.sessionState(1).err != nil || tt.HasText("网络超时") {
+		t.Fatalf("关闭错误提示后错误未清空: err=%v", a.sessionState(1).err)
+	}
+
+	// 收起侧边栏后隐藏侧边栏，并在聊天顶栏出现展开按钮
+	tt.Click("收起侧边栏")
+	if !a.sidebarCollapsed || tt.HasText("新建会话") {
+		t.Fatalf("收起侧边栏后状态不符: collapsed=%v, texts=%q", a.sidebarCollapsed, tt.Texts())
+	}
+
+	// 点击展开侧边栏恢复显示
+	tt.Click("展开侧边栏")
+	if a.sidebarCollapsed || !tt.HasText("待确认") {
+		t.Fatalf("展开侧边栏后未恢复显示: collapsed=%v, texts=%q", a.sidebarCollapsed, tt.Texts())
+	}
+}
+
+func TestChatMessageRenderingAndReasoningToggle(t *testing.T) {
+	a := &app{
+		cfg: config.Config{DefaultModel: "deepseek-chat"},
+		sessions: sessionList{
+			list:       []storage.Session{{ID: 1, Title: "消息渲染测试"}},
+			selectedID: 1,
+		},
+		sessionStates: map[int64]*sessionState{
+			1: {
+				historyLoaded: true,
+				messages: []*chatMessage{
+					{Message: apis.Message{Role: "user", Content: "请列出当前目录"}},
+					{Message: apis.Message{
+						Role:             "assistant",
+						ReasoningContent: "先调用 bash 查看目录",
+						Content:          "这是 **Markdown** 回复",
+						ToolCalls: []apis.ToolCall{{
+							ID:       "c1",
+							Type:     "function",
+							Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"ls"}`},
+						}},
+					}},
+					{Message: apis.Message{Role: "tool", ToolCallID: "c1", Content: "README.md\ngo.mod\n"}},
+				},
+			},
+		},
+	}
+
+	tt := ui.NewTester(a.view, 1040, 700)
+
+	// 不再出现 CLI 风格前缀
+	for _, legacy := range []string{"[用户]", "[回复]", "[思考内容]", "[工具调用]", "[工具结果]"} {
+		if tt.HasText(legacy) {
+			t.Fatalf("界面仍残留旧 CLI 前缀 %q，当前文本: %q", legacy, tt.Texts())
+		}
+	}
+
+	// 用户消息、Markdown 正文、工具调用与输出均应渲染
+	for _, want := range []string{"请列出当前目录", "Markdown", "工具调用", "bash", "工具输出", "README.md"} {
+		if !tt.HasText(want) {
+			t.Fatalf("消息列表缺少预期内容 %q，当前文本: %q", want, tt.Texts())
+		}
+	}
+
+	// 思考内容默认折叠，点击“思考过程”展开后再点击可收起
+	if tt.HasText("先调用 bash 查看目录") {
+		t.Fatal("思考内容默认应折叠隐藏")
+	}
+	tt.Click("思考过程")
+	if !tt.HasText("先调用 bash 查看目录") {
+		t.Fatalf("点击展开思考过程后未显示思考内容，当前文本: %q", tt.Texts())
+	}
+	tt.Click("思考过程")
+	if a.sessionState(1).messages[1].reasoningOpen {
+		t.Fatal("再次点击思考过程应关闭展开态")
+	}
+}
+
+func TestComposerKeyboardAndConfirmCard(t *testing.T) {
+	var submitted []string
+	stopped := false
+	decided := []bool{}
+
+	draft := ""
+	opts := apis.StreamOptions{
+		Thinking:        true,
+		ReasoningEffort: "low",
+		Tools:           []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}},
+	}
+	var pop optsPopover
+	running := false
+	confirm := &confirmToolCall{dir: "/workspace", command: "ls -la"}
+
+	view := func(c *ui.Context) {
+		applyTheme(c)
+		ui.Column(c).Fill().Padding(16).Gap(12).Children(func() {
+			if confirm != nil {
+				renderConfirmCard(c, confirm, func(allow bool) {
+					decided = append(decided, allow)
+					confirm = nil
+				})
+			}
+			renderComposer(c, composerProps{
+				sessionID:   1,
+				inputText:   &draft,
+				model:       "deepseek-chat",
+				opts:        &opts,
+				hasTools:    true,
+				optsPopover: &pop,
+				running:     running,
+				onSubmit: func(text string) {
+					submitted = append(submitted, text)
+					draft = ""
+				},
+				onStop: func() {
+					stopped = true
+				},
+			})
+		})
+	}
+
+	tt := ui.NewTester(view, 800, 500)
+
+	// 确认卡片展示目录和命令，点击批准触发回调
+	if !tt.HasText("等待确认") || !tt.HasText("ls -la") {
+		t.Fatalf("确认卡片未渲染预期内容: %q", tt.Texts())
+	}
+	tt.Click("批准")
+	if len(decided) != 1 || !decided[0] {
+		t.Fatalf("点击批准后结果 = %v，预期 [true]", decided)
+	}
+
+	// 输入区底部仅展示思考强度摘要
+	if !tt.HasText("思考强度 low") {
+		t.Fatalf("未展示思考强度摘要，当前文本: %q", tt.Texts())
+	}
+
+	// 聚焦输入框：Shift+Enter 换行不发送，Enter 直接发送并清空草稿
+	tt.Click("消息输入框")
+	tt.Type("第一行")
+	tt.Key(ui.Shift, ui.KeyEnter)
+	tt.Type("第二行")
+	if len(submitted) != 0 || draft != "第一行\n第二行" {
+		t.Fatalf("Shift+Enter 不应提交: submitted=%q, draft=%q", submitted, draft)
+	}
+
+	tt.Key(0, ui.KeyEnter)
+	if len(submitted) != 1 || submitted[0] != "第一行\n第二行" || draft != "" {
+		t.Fatalf("Enter 应提交并清空草稿: submitted=%q, draft=%q", submitted, draft)
+	}
+
+	// 运行态切换为“停止”按钮并响应点击
+	running = true
+	tt.Frame()
+	tt.Click("停止")
+	if !stopped {
+		t.Fatal("运行态点击停止应触发 onStop")
+	}
+}
+
 func TestSubmitBlocksWhenHistoryLoadFails(t *testing.T) {
 	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {

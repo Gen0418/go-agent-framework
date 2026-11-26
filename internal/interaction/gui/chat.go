@@ -1,58 +1,121 @@
 package gui
 
 import (
-	"fmt"
-
 	"github.com/egoist/mygo/ui"
+	"github.com/egoist/mygo/ui/markdown"
 )
 
 type chatProps struct {
-	sessionID int64
-	title     string
-	err       error
-	messages  []*chatMessage
-	confirm   *confirmToolCall
-	onConfirm func(allow bool)
-	composer  composerProps
+	sessionID        int64
+	title            string
+	model            string
+	running          bool
+	sidebarCollapsed bool
+	onExpandSidebar  func()
+	err              error
+	onDismissErr     func()
+	messages         []*chatMessage
+	curReply         *chatMessage
+	listState        *ui.ListState
+	md               *markdown.Options
+	confirm          *confirmToolCall
+	onConfirm        func(allow bool)
+	composer         composerProps
 }
 
 // 聊天主区组件
-// 包含标题栏、错误提示、消息滚动区、工具确认卡与底部输入区
+// 包含顶部标题栏、可关闭错误横幅、自动跟底消息列表/空态引导、工具确认卡与底部输入区
 func renderChat(c *ui.Context, props chatProps) {
-	ui.Column(c).Grow(1).FillHeight().Children(func() {
-		ui.Text(c, props.title) // 标题栏
+	t := c.Theme()
+
+	ui.Column(c).Grow(1).FillHeight().Background(t.Background).Children(func() {
+		renderChatHeader(c, props)
 
 		if props.err != nil {
-			ui.Text(c, props.err.Error())
+			dangerBanner(c, props.err.Error(), props.onDismissErr)
 		}
 
-		ui.Scroll(c.Key(scrollKey(props.sessionID))).Grow(1).Children(func() {
-			for _, msg := range props.messages {
-				renderMessage(c, msg)
-			}
-		})
+		renderMessageList(c, props)
 
 		if props.confirm != nil {
-			renderConfirmCard(c, props.confirm, props.onConfirm)
+			ui.Box(c).Shrink(0).Padding(0, 20, 8, 20).Children(func() {
+				renderConfirmCard(c, props.confirm, props.onConfirm)
+			})
 		}
 
-		renderComposer(c, props.composer)
+		ui.Box(c).Shrink(0).Padding(8, 20, 16, 20).Children(func() {
+			chatColumn(c).Children(func() {
+				renderComposer(c, props.composer)
+			})
+		})
+	})
+}
+
+func renderChatHeader(c *ui.Context, props chatProps) {
+	t := c.Theme()
+
+	topBar(c, 20, func() {
+		if props.sidebarCollapsed && iconButton(c, "»", "展开侧边栏").Clicked() && props.onExpandSidebar != nil {
+			props.onExpandSidebar()
+		}
+		ui.Text(c, props.title).FontSize(14).FontWeight(600).SingleLine().Grow(1)
+		if props.running {
+			statusSpinner(c, "生成中")
+		}
+		if props.model != "" {
+			pill(c, props.model, t.TextMuted, t.Surface)
+		}
+	})
+}
+
+// 消息滚动列表区域
+// 使用 ui.List 跟随流式输出末尾，用户上滑时自动暂停并显示回到底部按钮
+func renderMessageList(c *ui.Context, props chatProps) {
+	t := c.Theme()
+
+	ui.Box(c).Grow(1).FillWidth().Children(func() {
+		if len(props.messages) == 0 {
+			ui.Column(c).Fill().Children(func() {
+				ui.Column(c).Margin(ui.Auto).AlignItems(ui.Center).Gap(8).Padding(24).Children(func() {
+					ui.Text(c, "SAISON").FontSize(22).FontWeight(600).LetterSpacing(1.5)
+					ui.Text(c, "输入消息开始新对话，或从左侧切换已有会话").FontSize(13).TextColor(t.TextMuted)
+				})
+			})
+			return
+		}
+
+		list := props.listState
+		if list != nil {
+			list.Key = func(i int) any { return i }
+			list.FollowEnd = true
+			list.FollowAnimation = &ui.Smooth
+		}
+
+		ui.List(c.Key(scrollKey(props.sessionID)), list, len(props.messages), func(i int) {
+			msg := props.messages[i]
+			chatColumn(c).Children(func() {
+				renderMessage(c, msg, messageProps{
+					streaming: props.running && msg == props.curReply,
+					md:        props.md,
+					onToggleFold: func() {
+						if list != nil {
+							list.HoldPlace()
+						}
+					},
+				})
+			})
+		}).Fill().Padding(16, 20).Gap(16)
+
+		if list != nil && !list.AtEnd() && scrollToEndButton(c).Clicked() {
+			list.ScrollToEnd()
+		}
 	})
 }
 
 // 工具执行确认卡片
-// 展示目标目录、待执行命令及批准/拒绝按钮
+// 居中对齐聊天列宽，展示目录、命令与拒绝/批准操作
 func renderConfirmCard(c *ui.Context, confirm *confirmToolCall, onDecide func(allow bool)) {
-	ui.Column(c).Children(func() {
-		ui.Text(c, fmt.Sprintf("请求执行命令 (目录: %s)", confirm.dir))
-		ui.Text(c, confirm.command)
-		ui.Row(c).Children(func() {
-			if ui.Button(c, "批准").Clicked() && onDecide != nil {
-				onDecide(true)
-			}
-			if ui.Button(c, "拒绝").Clicked() && onDecide != nil {
-				onDecide(false)
-			}
-		})
+	chatColumn(c).Children(func() {
+		confirmCard(c, confirm.dir, confirm.command, onDecide)
 	})
 }

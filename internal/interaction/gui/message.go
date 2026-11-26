@@ -1,39 +1,49 @@
 package gui
 
 import (
-	"fmt"
+	"strings"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/egoist/mygo/ui/markdown"
 )
 
+type messageProps struct {
+	streaming    bool
+	md           *markdown.Options
+	onToggleFold func()
+}
+
 // 单条消息组件
-// 按角色渲染用户消息、可折叠思考块、回复正文、工具调用与工具结果
-func renderMessage(c *ui.Context, msg *chatMessage) {
-	ui.Column(c.Key(msg)).Children(func() {
-		switch msg.Role {
-		case "user":
-			ui.Text(c, fmt.Sprintf("[用户] %s\n", msg.Content))
-		case "assistant":
-			if msg.ReasoningContent != "" { // 思考内容
-				ui.Collapsible(
-					c,
-					"思考",
-					&msg.reasoningOpen,
-					func() {
-						ui.Text(c, fmt.Sprintf("[思考内容] %s\n", msg.ReasoningContent))
-					},
-				)
+// 按角色渲染用户气泡、可折叠思考卡片、流式/静态 Markdown 正文与等宽工具卡片
+func renderMessage(c *ui.Context, msg *chatMessage, props messageProps) {
+	switch msg.Role {
+	case "user":
+		userBubble(c, msg.Content)
+	case "assistant":
+		ui.Column(c).FillWidth().Gap(10).Children(func() {
+			if msg.ReasoningContent != "" {
+				label := "思考过程"
+				if props.streaming && msg.Content == "" && len(msg.ToolCalls) == 0 {
+					label = "思考中…"
+				}
+				if reasoningBox(c, label, &msg.reasoningOpen, msg.ReasoningContent) && props.onToggleFold != nil {
+					props.onToggleFold()
+				}
 			}
-			if msg.Content != "" { // 正文内容
-				ui.Text(c, fmt.Sprintf("[回复] %s\n", msg.Content))
+			if msg.Content != "" {
+				if props.streaming && len(msg.ToolCalls) == 0 {
+					markdown.Stream(c, msg.Content, props.md)
+				} else {
+					markdown.View(c, msg.Content, props.md)
+				}
 			}
-			for _, call := range msg.ToolCalls { // 工具调用
-				ui.Text(c, fmt.Sprintf("[工具调用] %s %s\n", call.Function.Name, call.Function.Args))
+			for _, call := range msg.ToolCalls {
+				toolCallCard(c, call.Function.Name, strings.TrimSpace(call.Function.Args))
 			}
-		case "tool": // 工具结果
-			ui.Text(c, fmt.Sprintf("[工具结果] %s\n", msg.Content))
-		default:
-			ui.Text(c, fmt.Sprintf("%s\n", msg.Content))
-		}
-	})
+		})
+	case "tool":
+		toolResultCard(c, strings.TrimRight(msg.Content, "\n"))
+	default:
+		ui.Text(c, msg.Content).FontSize(14).LineHeight(1.5).Selectable()
+	}
 }

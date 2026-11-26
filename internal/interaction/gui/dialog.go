@@ -32,31 +32,33 @@ func (d *renameDialog) close() {
 }
 
 func (d *renameDialog) view(c *ui.Context, onSave func(sessionID int64, title string) error) {
-	ui.Modal(c, &d.visible, func() {
-		ui.Column(c).Children(func() {
-			ui.Text(c, "重命名会话")
-			submitted := ui.TextInput(c.Key(d.sessionID), &d.title).Submitted()
-			if d.err != nil {
-				ui.Text(c, d.err.Error())
+	modalDialog(c, &d.visible, 360, "重命名会话", func() {
+		submitted := false
+		formField(c, "会话标题", func() {
+			submitted = ui.TextInput(c.Key(d.sessionID), &d.title).
+				FillWidth().
+				AutoFocus().
+				Placeholder("输入新的会话标题").
+				Submitted()
+		})
+		dialogError(c, d.err)
+		dialogActions(c, func() {
+			if ui.Button(c, "取消").Clicked() {
+				d.close()
 			}
-			ui.Row(c).Children(func() {
-				if ui.Button(c, "取消").Clicked() {
-					d.close()
+			if ui.PrimaryButton(c, "保存").Clicked() || submitted {
+				if err := onSave(d.sessionID, d.title); err != nil {
+					d.err = err
+					return
 				}
-				if ui.Button(c, "保存").Clicked() || submitted {
-					if err := onSave(d.sessionID, d.title); err != nil {
-						d.err = err
-						return
-					}
-					d.close()
-				}
-			})
+				d.close()
+			}
 		})
 	})
 }
 
 // 删除会话确认弹框组件
-// 包含待删会话提示、错误展示及取消/确认删除按钮
+// 包含待删会话提示、不可恢复说明、错误展示及取消/危险红确认删除按钮
 type deleteDialog struct {
 	visible   bool
 	sessionID int64
@@ -78,25 +80,24 @@ func (d *deleteDialog) close() {
 }
 
 func (d *deleteDialog) view(c *ui.Context, onConfirm func(sessionID int64) error) {
-	ui.Modal(c, &d.visible, func() {
-		ui.Column(c).Children(func() {
-			ui.Text(c, "删除会话")
-			ui.Text(c, fmt.Sprintf("确定删除“%s”吗？", d.title))
-			if d.err != nil {
-				ui.Text(c, d.err.Error())
+	t := c.Theme()
+	modalDialog(c, &d.visible, 360, "删除会话", func() {
+		ui.Column(c).FillWidth().Gap(4).Children(func() {
+			ui.Text(c, fmt.Sprintf("确定删除“%s”吗？", d.title)).FontSize(13).LineHeight(1.5)
+			ui.Text(c, "删除后该会话的消息记录将无法恢复。").FontSize(12).TextColor(t.TextMuted)
+		})
+		dialogError(c, d.err)
+		dialogActions(c, func() {
+			if ui.Button(c, "取消").Clicked() {
+				d.close()
 			}
-			ui.Row(c).Children(func() {
-				if ui.Button(c, "取消").Clicked() {
-					d.close()
+			if dangerButton(c, "确认删除").Clicked() {
+				if err := onConfirm(d.sessionID); err != nil {
+					d.err = err
+					return
 				}
-				if ui.Button(c, "确认删除").Clicked() {
-					if err := onConfirm(d.sessionID); err != nil {
-						d.err = err
-						return
-					}
-					d.close()
-				}
-			})
+				d.close()
+			}
 		})
 	})
 }
@@ -123,39 +124,48 @@ func (d *settingsDialog) close() {
 }
 
 func (d *settingsDialog) view(c *ui.Context, onSave func(cfg config.Config) error) {
-	ui.Modal(c, &d.visible, func() {
-		ui.Column(c).Children(func() {
-			ui.Text(c, "应用设置")
+	t := c.Theme()
+	modalDialog(c, &d.visible, 440, "应用设置", func() {
+		ui.Text(c, "保存至本地 config.json，仅对后续发起的请求生效。").
+			FontSize(12).
+			TextColor(t.TextMuted)
 
-			ui.Text(c, "APIKey")
-			keyInput := ui.TextInput(c, &d.cfg.APIKey).Placeholder("sk-...")
+		formField(c, "APIKey", func() {
+			keyInput := ui.TextInput(c, &d.cfg.APIKey).
+				FillWidth().
+				AutoFocus().
+				Placeholder("sk-...")
 			if !d.showKey {
 				keyInput.Password()
 			}
 			ui.Checkbox(c, &d.showKey, "显示 APIKey")
+		})
 
-			ui.Text(c, "Endpoint")
-			ui.TextInput(c, &d.cfg.Endpoint)
+		formField(c, "Endpoint", func() {
+			ui.TextInput(c, &d.cfg.Endpoint).
+				FillWidth().
+				Placeholder("https://api.deepseek.com/chat/completions")
+		})
 
-			ui.Text(c, "默认模型")
-			ui.TextInput(c, &d.cfg.DefaultModel)
+		formField(c, "默认模型", func() {
+			ui.TextInput(c, &d.cfg.DefaultModel).
+				FillWidth().
+				Placeholder("deepseek-flash")
+		})
 
-			if d.err != nil {
-				ui.Text(c, d.err.Error())
+		dialogError(c, d.err)
+
+		dialogActions(c, func() {
+			if ui.Button(c, "取消").Clicked() {
+				d.close()
 			}
-
-			ui.Row(c).Children(func() {
-				if ui.Button(c, "取消").Clicked() {
-					d.close()
+			if ui.PrimaryButton(c, "保存").Clicked() {
+				if err := onSave(d.cfg); err != nil {
+					d.err = err
+					return
 				}
-				if ui.Button(c, "保存").Clicked() {
-					if err := onSave(d.cfg); err != nil {
-						d.err = err
-						return
-					}
-					d.close()
-				}
-			})
+				d.close()
+			}
 		})
 	})
 }

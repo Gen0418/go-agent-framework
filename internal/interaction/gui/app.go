@@ -15,6 +15,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"github.com/egoist/mygo/ui/markdown"
 )
 
 // GUI应用主体
@@ -30,15 +31,30 @@ type app struct {
 	defaultOpts apis.StreamOptions // 默认会话设置(Thinking/ReasoningEffort/Tools)
 
 	// 会话级信息
-	sessions       sessionList
-	sessionStates  map[int64]*sessionState // sessionID -> sessionState
-	optsPopover    optsPopover             // 会话选项浮层组件
-	renameDialog   renameDialog            // 重命名弹框状态
-	deleteDialog   deleteDialog            // 删除确认弹框状态
-	settingsDialog settingsDialog          // 应用设置弹框状态
+	sessions         sessionList
+	sessionStates    map[int64]*sessionState // sessionID -> sessionState
+	chatLists        map[int64]*ui.ListState // sessionID -> 消息列表滚动状态（与纯状态解耦）
+	md               markdown.Options        // Markdown 渲染选项（所有会话共享，默认按词淡入）
+	sidebarCollapsed bool                    // 侧边栏是否收起（零值默认展开）
+	optsPopover      optsPopover             // 会话选项浮层组件
+	renameDialog     renameDialog            // 重命名弹框状态
+	deleteDialog     deleteDialog            // 删除确认弹框状态
+	settingsDialog   settingsDialog          // 应用设置弹框状态
 
 	// 应用级错误
 	err error
+}
+
+func (a *app) chatList(id int64) *ui.ListState {
+	if a.chatLists == nil {
+		a.chatLists = make(map[int64]*ui.ListState)
+	}
+	if l, ok := a.chatLists[id]; ok {
+		return l
+	}
+	l := &ui.ListState{}
+	a.chatLists[id] = l
+	return l
 }
 
 func (a *app) sessionState(id int64) *sessionState {
@@ -64,25 +80,41 @@ func (a *app) selectedSessionState() (storage.Session, *sessionState, bool) {
 }
 
 // 应用根视图
-// 包含侧边栏、聊天主区以及重命名/删除/设置三个全局弹框
+// 包含可折叠侧边栏、聊天主区以及重命名/删除/设置三个全局弹框
 func (a *app) view(c *ui.Context) {
+	applyTheme(c)
+
 	ui.Row(c).Fill().Children(func() {
-		renderSidebar(c, sidebarProps{
-			sessions:   a.sessions.list,
-			selectedID: a.sessions.selectedID,
-			onNew: func() {
-				a.sessions.selectedID = 0
-				a.err = nil
-			},
-			onSelect: func(id int64) {
-				_ = a.selectSession(id)
-			},
-			onRename: a.renameDialog.open,
-			onDelete: a.deleteDialog.open,
-			onSettings: func() {
-				a.settingsDialog.open(a.cfg)
-			},
-		})
+		if !a.sidebarCollapsed {
+			items := make([]sidebarItem, 0, len(a.sessions.list))
+			for _, s := range a.sessions.list {
+				item := sidebarItem{session: s}
+				if st, ok := a.sessionStates[s.ID]; ok {
+					item.running = st.running
+					item.pendingConfirm = st.confirm != nil
+				}
+				items = append(items, item)
+			}
+			renderSidebar(c, sidebarProps{
+				items:      items,
+				selectedID: a.sessions.selectedID,
+				onNew: func() {
+					a.sessions.selectedID = 0
+					a.err = nil
+				},
+				onCollapse: func() {
+					a.sidebarCollapsed = true
+				},
+				onSelect: func(id int64) {
+					_ = a.selectSession(id)
+				},
+				onRename: a.renameDialog.open,
+				onDelete: a.deleteDialog.open,
+				onSettings: func() {
+					a.settingsDialog.open(a.cfg)
+				},
+			})
+		}
 		a.renderActiveChat(c)
 	})
 	a.renameDialog.view(c, a.renameSession)
@@ -94,16 +126,35 @@ func (a *app) renderActiveChat(c *ui.Context) {
 	curSession, curSessionState, ok := a.selectedSessionState()
 	if !ok {
 		ui.Column(c).Grow(1).FillHeight().Children(func() {
-			ui.Text(c, "暂无会话")
+			ui.Text(c, "暂无会话").TextColor(c.Theme().TextMuted).Margin(ui.Auto)
 		})
 		return
 	}
 
+	if a.md.Theme == nil {
+		a.md.Theme = &markdown.Theme{
+			FontSize:   14,
+			LinkWeight: 500,
+		}
+	}
+
 	renderChat(c, chatProps{
-		sessionID: curSession.ID,
-		title:     curSession.Title,
-		err:       curSessionState.err,
+		sessionID:        curSession.ID,
+		title:            curSession.Title,
+		model:            a.cfg.DefaultModel,
+		running:          curSessionState.running,
+		sidebarCollapsed: a.sidebarCollapsed,
+		onExpandSidebar: func() {
+			a.sidebarCollapsed = false
+		},
+		err: curSessionState.err,
+		onDismissErr: func() {
+			curSessionState.err = nil
+		},
 		messages:  curSessionState.messages,
+		curReply:  curSessionState.curReply,
+		listState: a.chatList(curSession.ID),
+		md:        &a.md,
 		confirm:   curSessionState.confirm,
 		onConfirm: curSessionState.resolveConfirm,
 		composer: composerProps{
@@ -144,6 +195,10 @@ func (a *app) lazyCreateSession(input string) (int64, error) {
 	curSession.historyLoaded = true
 	curSession.err = nil
 	a.sessionStates[id] = curSession
+	if list, ok := a.chatLists[0]; ok {
+		delete(a.chatLists, 0)
+		a.chatLists[id] = list
+	}
 
 	a.sessions.add(storage.Session{ID: id, Title: title})
 	a.sessions.selectedID = id
@@ -214,6 +269,7 @@ func (a *app) deleteSession(sessionID int64) error {
 
 	prevSelectedID := a.sessions.selectedID
 	delete(a.sessionStates, sessionID)
+	delete(a.chatLists, sessionID)
 	nextID, _ := a.sessions.remove(sessionID)
 	a.err = nil
 
@@ -395,10 +451,12 @@ func Run(ctx context.Context, store *storage.Store, cfg config.Config, cfgPath s
 
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
-			Title:   "SAISON",
-			Width:   960,
-			Height:  640,
-			Content: ui.View(a.view),
+			Title:     "SAISON",
+			Width:     1040,
+			Height:    700,
+			MinWidth:  680,
+			MinHeight: 480,
+			Content:   ui.View(a.view),
 		})
 		a.win.OnClosed(func() {
 			a.cancel()
