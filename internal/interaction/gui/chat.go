@@ -113,9 +113,9 @@ func renderMessageList(c *ui.Context, props chatProps) {
 }
 
 // 工具执行确认卡片
-// 居中对齐聊天列宽，展示目录、命令与拒绝/批准操作
+// 居中对齐聊天列宽，展示目录、可滚动命令区与拒绝/批准操作
 func renderConfirmCard(c *ui.Context, confirm *confirmToolCall, onDecide func(allow bool)) {
 	chatColumn(c).Children(func() {
-		confirmCard(c, confirm.dir, confirm.command, onDecide)
+		confirmCard(c, confirm, onDecide)
 	})
 }

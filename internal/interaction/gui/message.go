@@ -37,8 +37,14 @@ func renderMessage(c *ui.Context, msg *chatMessage, props messageProps) {
 					markdown.View(c, msg.Content, props.md)
 				}
 			}
-			for _, call := range msg.ToolCalls {
-				toolCallCard(c, call.Function.Name, strings.TrimSpace(call.Function.Args))
+			for i, call := range msg.ToolCalls {
+				key := any(call.ID)
+				if call.ID == "" {
+					key = i
+				}
+				if toolCallCard(c, key, call.Function.Name, strings.TrimSpace(call.Function.Args)) && props.onToggleFold != nil {
+					props.onToggleFold()
+				}
 			}
 		})
 	case "tool":

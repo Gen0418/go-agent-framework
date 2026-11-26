@@ -579,6 +579,68 @@ func TestComposerKeyboardAndConfirmCard(t *testing.T) {
 	}
 }
 
+func TestLongToolCallAndConfirmStayScrollableAndVisible(t *testing.T) {
+	lines := make([]string, 60)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("echo line-%02d", i+1)
+	}
+	longCmd := strings.Join(lines, "\n")
+	longArgs := fmt.Sprintf(`{"command":%q}`, longCmd)
+
+	confirm := &confirmToolCall{dir: "/workspace", command: longCmd, reply: make(chan bool, 1)}
+	a := &app{
+		cfg: config.Config{DefaultModel: "deepseek-chat"},
+		sessions: sessionList{
+			list:       []storage.Session{{ID: 1, Title: "长命令测试"}},
+			selectedID: 1,
+		},
+		sessionStates: map[int64]*sessionState{
+			1: {
+				historyLoaded: true,
+				running:       true,
+				confirm:       confirm,
+				messages: []*chatMessage{
+					{Message: apis.Message{
+						Role: "assistant",
+						ToolCalls: []apis.ToolCall{{
+							ID:       "long-call",
+							Type:     "function",
+							Function: apis.ToolCallFunction{Name: "powershell", Args: longArgs},
+						}},
+					}},
+				},
+			},
+		},
+	}
+
+	// 按最小窗口尺寸（680×480）渲染，验证长命令不会把“批准/拒绝”挤出视野
+	tt := ui.NewTester(a.view, 680, 480)
+
+	// 消息列表中的长工具参数默认折叠（不包含完整 JSON 参数文本），确认卡展示行数摘要
+	if tt.HasText(`{"command":`) {
+		t.Fatal("长工具调用参数默认应折叠隐藏")
+	}
+	if !tt.HasText("共 60 行") {
+		t.Fatalf("长命令确认卡应显示行数摘要，当前文本: %q", tt.Texts())
+	}
+
+	// 展开消息中的长工具参数
+	tt.Click("切换工具参数展开")
+	if !tt.HasText(`{"command":`) || !tt.HasText("收起") {
+		t.Fatalf("展开长工具参数后应显示参数与收起按钮，当前文本: %q", tt.Texts())
+	}
+
+	// 切换确认卡命令区的展开/收起，且“批准”按钮在最小窗口下依然可点
+	tt.Click("切换待确认命令展开")
+	if !confirm.expanded {
+		t.Fatal("点击展开后 confirm.expanded 应为 true")
+	}
+	tt.Click("批准")
+	if allow := <-confirm.reply; !allow {
+		t.Fatal("长命令展开状态下点击批准应正常返回 true")
+	}
+}
+
 func TestSubmitBlocksWhenHistoryLoadFails(t *testing.T) {
 	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {

@@ -104,9 +104,10 @@ func (s *sessionState) setToolsEnabled(enabled bool, defaults []apis.Tool) {
 }
 
 type confirmToolCall struct {
-	dir     string
-	command string
-	reply   chan bool // 容量为1
+	dir      string
+	command  string
+	expanded bool
+	reply    chan bool // 容量为1
 }
 
 // 全会话列表

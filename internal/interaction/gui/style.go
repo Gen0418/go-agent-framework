@@ -1,11 +1,22 @@
 package gui
 
-import "github.com/egoist/mygo/ui"
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/egoist/mygo/ui"
+)
 
 const (
-	sidebarWidth = 240
-	headerHeight = 48
-	chatMaxWidth = 760
+	sidebarWidth        = 240
+	headerHeight        = 48
+	chatMaxWidth        = 760
+	toolFoldMaxLines    = 5
+	toolFoldMaxRunes    = 240
+	toolScrollHeight    = 220
+	confirmCompactMaxH  = 100
+	confirmExpandedMaxH = 240
 )
 
 // 应用极简黑白灰主题
@@ -247,31 +258,88 @@ func reasoningBox(c *ui.Context, label string, open *bool, text string) bool {
 	return changed
 }
 
-// 工具调用卡片
-// 展示工具名与等宽 JSON 参数，参数可选中复制
-func toolCallCard(c *ui.Context, name, args string) {
+func isLongToolText(s string) bool {
+	return strings.Count(s, "\n")+1 > toolFoldMaxLines || utf8.RuneCountInString(s) > toolFoldMaxRunes
+}
+
+func toolTextSummary(s string) string {
+	lines := strings.Count(s, "\n") + 1
+	if lines > 1 {
+		return fmt.Sprintf("共 %d 行", lines)
+	}
+	return fmt.Sprintf("共 %d 字符", utf8.RuneCountInString(s))
+}
+
+func foldToggleButton(c *ui.Context, expanded bool, label string) ui.Element {
 	t := c.Theme()
-	ui.Column(c).
+	text := "展开"
+	if expanded {
+		text = "收起"
+	}
+	btn := ui.ButtonBase(c).Padding(2, 8).Radius(6).Shrink(0).Label(label)
+	if btn.Hovered() {
+		btn.Background(t.SurfaceHover)
+	}
+	btn.Children(func() {
+		ui.Text(c, text).FontSize(11).TextColor(t.TextMuted).SingleLine()
+	})
+	return btn
+}
+
+// 工具调用卡片
+// 短参数直接展示；长参数默认折叠，展开后在限高滚动区中展示，返回本帧是否切换折叠态
+func toolCallCard(c *ui.Context, key any, name, args string) bool {
+	t := c.Theme()
+	long := isLongToolText(args)
+	changed := false
+
+	card := ui.Column(c.Key(key)).
 		FillWidth().
 		Padding(8, 12).
 		Gap(6).
 		Radius(t.Radius).
 		Background(t.Surface).
-		Border(1, t.Border).
-		Children(func() {
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				pill(c, "工具调用", t.TextMuted, t.Background)
-				ui.Text(c, name).Font("monospace").FontSize(12).FontWeight(600).SingleLine()
-			})
-			if args != "" {
+		Border(1, t.Border)
+	expanded := ui.Local(card, "expanded", func() bool { return false })
+
+	card.Children(func() {
+		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+			pill(c, "工具调用", t.TextMuted, t.Background)
+			ui.Text(c, name).Font("monospace").FontSize(12).FontWeight(600).SingleLine()
+			if long {
+				ui.Spacer(c)
+				ui.Text(c, toolTextSummary(args)).FontSize(11).TextColor(t.TextMuted).SingleLine().Shrink(0)
+				if foldToggleButton(c, *expanded, "切换工具参数展开").Clicked() {
+					*expanded = !*expanded
+					changed = true
+				}
+			}
+		})
+		if args == "" {
+			return
+		}
+		if !long {
+			ui.Text(c, args).
+				Font("monospace").
+				FontSize(12).
+				LineHeight(1.45).
+				TextColor(t.TextMuted).
+				Selectable()
+			return
+		}
+		if *expanded {
+			ui.Scroll(c).MaxHeight(toolScrollHeight).FillWidth().Children(func() {
 				ui.Text(c, args).
 					Font("monospace").
 					FontSize(12).
 					LineHeight(1.45).
+					TabSize(4).
 					TextColor(t.TextMuted).
 					Selectable()
-			}
-		})
+			})
+		}
+	})
+	return changed
 }
 
 // 工具输出卡片
@@ -385,9 +453,15 @@ func dangerButton(c *ui.Context, label string) ui.Element {
 }
 
 // 工具执行确认卡片
-// 琥珀色警示边框包裹目标目录、等宽命令展示与拒绝/批准操作栏
-func confirmCard(c *ui.Context, dir, command string, onDecide func(allow bool)) {
+// 琥珀色警示边框包裹目标目录、可滚动命令区与固定可见的拒绝/批准操作栏；长命令默认收起至紧凑高度
+func confirmCard(c *ui.Context, confirm *confirmToolCall, onDecide func(allow bool)) {
 	t := c.Theme()
+	long := isLongToolText(confirm.command)
+	maxH := float32(confirmCompactMaxH)
+	if confirm.expanded {
+		maxH = confirmExpandedMaxH
+	}
+
 	ui.Column(c).
 		FillWidth().
 		Padding(12, 14).
@@ -396,10 +470,16 @@ func confirmCard(c *ui.Context, dir, command string, onDecide func(allow bool)) 
 		Background(t.Warning.Alpha(0.08)).
 		Border(1, t.Warning.Alpha(0.38)).
 		Children(func() {
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Shrink(0).Children(func() {
 				pill(c, "等待确认", t.Warning, t.Warning.Alpha(0.16))
 				ui.Text(c, "请求执行本地命令").FontSize(13).FontWeight(600).Shrink(0)
-				ui.Text(c, dir).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1).TextAlign(ui.End)
+				ui.Text(c, confirm.dir).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1).TextAlign(ui.End)
+				if long {
+					ui.Text(c, toolTextSummary(confirm.command)).FontSize(11).TextColor(t.TextMuted).SingleLine().Shrink(0)
+					if foldToggleButton(c, confirm.expanded, "切换待确认命令展开").Clicked() {
+						confirm.expanded = !confirm.expanded
+					}
+				}
 			})
 			ui.Box(c).
 				FillWidth().
@@ -408,13 +488,16 @@ func confirmCard(c *ui.Context, dir, command string, onDecide func(allow bool)) 
 				Background(t.Background).
 				Border(1, t.Border).
 				Children(func() {
-					ui.Text(c, command).
-						Font("monospace").
-						FontSize(12).
-						LineHeight(1.45).
-						Selectable()
+					ui.Scroll(c).MaxHeight(maxH).FillWidth().Children(func() {
+						ui.Text(c, confirm.command).
+							Font("monospace").
+							FontSize(12).
+							LineHeight(1.45).
+							TabSize(4).
+							Selectable()
+					})
 				})
-			ui.Row(c).FillWidth().Justify(ui.End).Gap(8).Children(func() {
+			ui.Row(c).FillWidth().Justify(ui.End).Gap(8).Shrink(0).Children(func() {
 				if ui.Button(c, "拒绝").Clicked() && onDecide != nil {
 					onDecide(false)
 				}
