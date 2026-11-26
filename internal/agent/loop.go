@@ -21,6 +21,7 @@ import (
 type AgentLoop struct {
 	SessionId int64 // 绑定会话Id
 	cfg       config.Config
+	client    *apis.Client
 	msgs      []apis.Message // 本会话的对话历史
 	db        *sql.DB
 	opts      apis.StreamOptions
@@ -44,9 +45,9 @@ type bashArgs struct {
 
 func NewAgentLoop(cfg config.Config, db *sql.DB, opts apis.StreamOptions) *AgentLoop {
 	l := &AgentLoop{
-		cfg: cfg,
-		db:  db,
+		db: db,
 	}
+	l.SetConfig(cfg)
 	l.SetOpts(opts)
 	return l
 }
@@ -60,6 +61,11 @@ func (l *AgentLoop) SetOpts(opts apis.StreamOptions) {
 // 更新应用级 cfg
 func (l *AgentLoop) SetConfig(cfg config.Config) {
 	l.cfg = cfg
+	l.client = &apis.Client{
+		Endpoint: cfg.Endpoint,
+		APIKey:   cfg.APIKey,
+		Model:    cfg.DefaultModel,
+	}
 }
 
 func (l *AgentLoop) NewSession(ctx context.Context, title string) error {
@@ -155,10 +161,6 @@ func (l *AgentLoop) RunTurn(ctx context.Context, inputFunc InputFunc, outputFunc
 
 			if output.Role == "" {
 				continue
-			}
-		} else {
-			if err := apis.CheckToolCalls(output.ToolCalls); err != nil {
-				return err
 			}
 		}
 
@@ -296,7 +298,7 @@ func (l *AgentLoop) readReply(ctx context.Context, outputFunc OutputFunc) (apis.
 	}
 
 	// 流式解析SSE
-	for event, err := range apis.StreamChat(ctx, l.msgs, l.opts, l.cfg) { // 解析sse流
+	for event, err := range l.client.StreamChat(ctx, l.msgs, l.opts) { // 解析sse流
 		if err != nil {
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return remainContent(), "", ctx.Err()

@@ -1,8 +1,6 @@
 package apis
 
 import (
-	"go-agent-framework/internal/config"
-
 	"bufio"
 	"bytes"
 	"context"
@@ -19,25 +17,23 @@ const (
 	doneSentinel = "[DONE]"
 )
 
-var client *http.Client = initHttpClient()
-
 // 流式对话入口，返回iter.Seq2回调函数用于range
-func StreamChat(ctx context.Context, msgs []Message, opts StreamOptions, cfg config.Config) iter.Seq2[StreamEvent, error] {
+func (c *Client) StreamChat(ctx context.Context, msgs []Message, opts StreamOptions) iter.Seq2[StreamEvent, error] {
 	return func(yield func(StreamEvent, error) bool) {
-		reqBody, err := json.Marshal(newChatRequest(msgs, opts, cfg))
+		reqBody, err := json.Marshal(c.newChatRequest(msgs, opts))
 		if err != nil {
 			yield(StreamEvent{}, err)
 			return
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Endpoint, bytes.NewReader(reqBody))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(reqBody))
 		if err != nil {
 			yield(StreamEvent{}, err)
 			return
 		}
-		initStreamReqHeader(req, cfg.APIKey) // 初始化Header
+		c.setStreamHeaders(req)
 
-		resp, err := client.Do(req) // 发送请求
+		resp, err := c.httpClient().Do(req)
 		if err != nil {
 			yield(StreamEvent{}, err)
 			return
@@ -105,10 +101,17 @@ func handleStream(body io.Reader, yield func(StreamEvent, error) bool) error {
 			callsBuffer.merge(choice.Delta.ToolCalls)
 		}
 		if choice.FinishReason != "" { // 结束块
+			var calls []ToolCall
+			if choice.FinishReason == "tool_calls" {
+				calls = callsBuffer.getCalls()
+				if err := checkToolCalls(calls); err != nil {
+					return err
+				}
+			}
 			if !yield(StreamEvent{
 				Kind:         EventFinish,
 				FinishReason: choice.FinishReason,
-				ToolCalls:    callsBuffer.getCalls(),
+				ToolCalls:    calls,
 			}, nil) {
 				return nil
 			}
@@ -118,9 +121,9 @@ func handleStream(body io.Reader, yield func(StreamEvent, error) bool) error {
 	return scanner.Err()
 }
 
-// 解析ChatResponseChunk
-func parseStreamChunk(raw string) (ChatResponseChunk, error) {
-	var chunk ChatResponseChunk
+// 解析 chatResponseChunk
+func parseStreamChunk(raw string) (chatResponseChunk, error) {
+	var chunk chatResponseChunk
 
 	err := json.Unmarshal([]byte(raw), &chunk)
 	return chunk, err

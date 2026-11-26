@@ -54,7 +54,7 @@ func (b toolCallBuffer) getCalls() []ToolCall {
 	return calls
 }
 
-func CheckToolCalls(calls []ToolCall) error {
+func checkToolCalls(calls []ToolCall) error {
 	if len(calls) == 0 {
 		return fmt.Errorf("模型请求调用工具，但调用列表为空")
 	}

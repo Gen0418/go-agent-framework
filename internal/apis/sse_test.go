@@ -15,8 +15,6 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
-
-	"go-agent-framework/internal/config"
 )
 
 // ---------- 测试辅助 ----------
@@ -44,12 +42,12 @@ func chunkLine(content string) string {
 	return sseLine("", content, "")
 }
 
-// testCfg 构造指向指定端点的测试配置，key/model 用固定占位值。
-func testCfg(endpoint string) config.Config {
-	return config.Config{
-		APIKey:       "test-key",
-		Endpoint:     endpoint,
-		DefaultModel: "deepseek-flash",
+// testClient 构造指向指定端点的测试客户端，key/model 用固定占位值。
+func testClient(endpoint string) *Client {
+	return &Client{
+		Endpoint: endpoint,
+		APIKey:   "test-key",
+		Model:    "deepseek-flash",
 	}
 }
 
@@ -558,13 +556,13 @@ func TestHandleStreamReaderBoundaries(t *testing.T) {
 func TestStreamChatRequestContract(t *testing.T) {
 	type captured struct {
 		header http.Header
-		req    ChatRequest
+		req    chatRequest
 	}
 	got := make(chan captured, 1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		var cr ChatRequest
+		var cr chatRequest
 		if err := json.Unmarshal(b, &cr); err != nil {
 			t.Errorf("请求体不是合法 JSON: %v (%q)", err, b)
 		}
@@ -578,10 +576,10 @@ func TestStreamChatRequestContract(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := testCfg(srv.URL)
+	cli := testClient(srv.URL)
 	var sb strings.Builder
-	for ev, err := range StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "ping"}}, StreamOptions{}, cfg) {
+	for ev, err := range cli.StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "ping"}}, StreamOptions{}) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -602,13 +600,13 @@ func TestStreamChatRequestContract(t *testing.T) {
 	if h := c.header.Get("Accept"); h != "text/event-stream" {
 		t.Errorf("Accept = %q", h)
 	}
-	if want := "Bearer " + cfg.APIKey; c.header.Get("Authorization") != want {
+	if want := "Bearer " + cli.APIKey; c.header.Get("Authorization") != want {
 		t.Errorf("Authorization = %q, want %q", c.header.Get("Authorization"), want)
 	}
 
 	// 请求体契约
-	if c.req.Model != cfg.DefaultModel {
-		t.Errorf("Model = %q, want %q（配置下发的型号应原样进请求）", c.req.Model, cfg.DefaultModel)
+	if c.req.Model != cli.Model {
+		t.Errorf("Model = %q, want %q（配置下发的型号应原样进请求）", c.req.Model, cli.Model)
 	}
 	if !c.req.Stream {
 		t.Error("Stream = false, 流式请求必须为 true")
@@ -660,15 +658,15 @@ func TestStreamChatRequestThinkingContract(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			for _, err := range StreamChat(context.Background(),
-				[]Message{{Role: "user", Content: "hi"}}, tt.opts, testCfg(srv.URL)) {
+			for _, err := range testClient(srv.URL).StreamChat(context.Background(),
+				[]Message{{Role: "user", Content: "hi"}}, tt.opts) {
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
 				}
 			}
 
 			c := <-got
-			var cr ChatRequest
+			var cr chatRequest
 			if err := json.Unmarshal([]byte(c.body), &cr); err != nil {
 				t.Fatalf("请求体不是合法 JSON: %v (%s)", err, c.body)
 			}
@@ -706,8 +704,8 @@ func TestStreamChatThinkingFlow(t *testing.T) {
 	defer srv.Close()
 
 	var evs []StreamEvent
-	for ev, err := range StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{Thinking: true}, testCfg(srv.URL)) {
+	for ev, err := range testClient(srv.URL).StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{Thinking: true}) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -749,8 +747,8 @@ func TestStreamChatNon200(t *testing.T) {
 			defer srv.Close()
 
 			var yielded bool
-			for ev, err := range StreamChat(context.Background(),
-				[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}, testCfg(srv.URL)) {
+			for ev, err := range testClient(srv.URL).StreamChat(context.Background(),
+				[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}) {
 				yielded = true
 				if err == nil {
 					t.Fatalf("期望错误，却收到事件 %+v", ev)
@@ -782,8 +780,8 @@ func TestStreamChatIsLazy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	seq := StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}, testCfg(srv.URL))
+	seq := testClient(srv.URL).StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{})
 	time.Sleep(100 * time.Millisecond)
 	if n := atomic.LoadInt32(&calls); n != 0 {
 		t.Fatalf("仅构造 seq 就发出了 %d 次请求，期望 0（应完全惰性）", n)
@@ -810,8 +808,8 @@ func TestStreamChatSeqReusable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	seq := StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "ping"}}, StreamOptions{}, testCfg(srv.URL))
+	seq := testClient(srv.URL).StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "ping"}}, StreamOptions{})
 	for i := 1; i <= 2; i++ {
 		var sb strings.Builder
 		for ev, err := range seq {
@@ -859,8 +857,8 @@ func TestStreamChatBreakClosesConnection(t *testing.T) {
 	defer srv.Close()
 
 	n := 0
-	for ev, err := range StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}, testCfg(srv.URL)) {
+	for ev, err := range testClient(srv.URL).StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
@@ -911,8 +909,8 @@ func TestStreamChatContextCancel(t *testing.T) {
 
 	var gotErr error
 	n := 0
-	for _, err := range StreamChat(ctx,
-		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}, testCfg(srv.URL)) {
+	for _, err := range testClient(srv.URL).StreamChat(ctx,
+		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}) {
 		if err != nil {
 			gotErr = err
 			break
@@ -932,9 +930,8 @@ func TestStreamChatContextCancel(t *testing.T) {
 // 端点不可达时的错误路径。
 func TestStreamChatUnreachableEndpoint(t *testing.T) {
 	var yielded bool
-	for _, err := range StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{},
-		testCfg("http://127.0.0.1:1/chat/completions")) {
+	for _, err := range testClient("http://127.0.0.1:1/chat/completions").StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}) {
 		yielded = true
 		if err == nil {
 			t.Fatal("期望错误")
@@ -948,8 +945,8 @@ func TestStreamChatUnreachableEndpoint(t *testing.T) {
 // 非法 URL 导致 NewRequestWithContext 失败，错误同样只能通过 yield 报出。
 func TestStreamChatInvalidEndpoint(t *testing.T) {
 	var gotErr error
-	for _, err := range StreamChat(context.Background(),
-		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}, testCfg("://not-a-valid-url")) {
+	for _, err := range testClient("://not-a-valid-url").StreamChat(context.Background(),
+		[]Message{{Role: "user", Content: "hi"}}, StreamOptions{}) {
 		if err != nil {
 			gotErr = err
 			break
@@ -960,5 +957,44 @@ func TestStreamChatInvalidEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(gotErr.Error(), "://not-a-valid-url") {
 		t.Logf("错误信息未包含原始 URL: %v", gotErr)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// 验证 Client.HTTP 可注入自定义传输层，不再强制走包级全局客户端。
+func TestClientCustomHTTP(t *testing.T) {
+	called := false
+	cli := &Client{
+		Endpoint: "https://example.invalid/chat/completions",
+		APIKey:   "custom-key",
+		Model:    "custom-model",
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				called = true
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(chunkLine("ok") + "data: [DONE]\n\n")),
+				}, nil
+			}),
+		},
+	}
+
+	var got strings.Builder
+	for ev, err := range cli.StreamChat(context.Background(), []Message{{Role: "user", Content: "hi"}}, StreamOptions{}) {
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if ev.Kind == EventContent {
+			got.WriteString(ev.Text)
+		}
+	}
+	if !called || got.String() != "ok" {
+		t.Fatalf("自定义 HTTP 未生效: called=%v, got=%q", called, got.String())
 	}
 }

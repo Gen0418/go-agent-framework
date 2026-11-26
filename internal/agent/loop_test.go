@@ -46,7 +46,9 @@ func newTestLoop(t *testing.T, exchanges ...exchange) *AgentLoop {
 			http.Error(w, "额外请求", http.StatusBadRequest)
 			return
 		}
-		var request apis.ChatRequest
+		var request struct {
+			Messages []apis.Message `json:"messages"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
 			http.Error(w, "请求格式错误", http.StatusBadRequest)

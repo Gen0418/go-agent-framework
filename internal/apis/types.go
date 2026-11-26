@@ -68,7 +68,7 @@ type StreamEvent struct {
 	ToolCalls    []ToolCall
 }
 
-type ChatRequest struct {
+type chatRequest struct {
 	Model           string          `json:"model"`
 	Messages        []Message       `json:"messages"`
 	Stream          bool            `json:"stream"`
@@ -85,7 +85,7 @@ type delta struct {
 	ReasoningContent string          `json:"reasoning_content"`
 	ToolCalls        []toolCallDelta `json:"tool_calls"`
 }
-type ChatResponseChunk struct {
+type chatResponseChunk struct {
 	Choices []struct {
 		Delta        delta  `json:"delta"`
 		FinishReason string `json:"finish_reason"` // ""表示流尚未结束
