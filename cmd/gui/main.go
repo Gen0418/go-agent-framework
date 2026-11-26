@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 
-	// 	"go-agent-framework/internal/agent"
 	"go-agent-framework/internal/apis"
 	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/interaction/gui"
@@ -13,24 +12,28 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	ctx := context.Background()
 	const cfgPath = "config.json"
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	opts := apis.StreamOptions{
 		Thinking:        true,
 		ReasoningEffort: "low",
 		Tools:           tools.DefaultRegistry().Definitions(),
 	}
-	store, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
+	store, err := storage.Open(ctx, "agent.db")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer store.Close()
 
-	if err := gui.Run(ctx, store, cfg, cfgPath, opts); err != nil {
-		log.Fatal(err)
-	}
+	return gui.Run(ctx, store, cfg, cfgPath, opts)
 }

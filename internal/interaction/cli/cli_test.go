@@ -40,20 +40,41 @@ func TestConfirm(t *testing.T) {
 	}
 }
 
+type errWriter struct {
+	err error
+}
+
+func (w errWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
 func TestPrintHistoryToolOutput(t *testing.T) {
 	const args = `{"command":"pwd"}`
 	for _, result := range []string{"/workspace", "/workspace\n"} {
 		var out bytes.Buffer
 		terminal := New(strings.NewReader(""), &out)
-		terminal.PrintHistory(t.Context(), []apis.Message{
+		if err := terminal.PrintHistory(t.Context(), []apis.Message{
 			{Role: "assistant", ToolCalls: []apis.ToolCall{{ID: "a", Function: apis.ToolCallFunction{Name: "bash", Args: args}}}},
 			{Role: "tool", ToolCallID: "a", Content: result},
-		})
+		}); err != nil {
+			t.Fatalf("PrintHistory 意外失败: %v", err)
+		}
 
 		want := "\n[工具调用] bash " + args + "\n\x1b[36m[工具输出] \x1b[0m/workspace\n"
 		if out.String() != want {
 			t.Errorf("结果 %q 的历史输出 = %q，预期 %q", result, out.String(), want)
 		}
+	}
+
+	wantErr := errors.New("输出管道已关闭")
+	failing := New(strings.NewReader(""), errWriter{err: wantErr})
+	if err := failing.PrintHistory(t.Context(), []apis.Message{
+		{Role: "assistant", ReasoningContent: "先想"},
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("写入失败应返回错误 %v，实际 %v", wantErr, err)
+	}
+	if failing.inReasoning {
+		t.Fatal("PrintHistory 出错返回后应重置 inReasoning 状态")
 	}
 }
 
@@ -61,20 +82,39 @@ func TestSelectSession(t *testing.T) {
 	for _, tc := range []struct {
 		input string
 		id    int64
+		isNew bool
+		err   error
 	}{
-		{" new ", 0}, {" 8 ", 8}, {"0", -1}, {"-2", -1}, {"abc", -1},
+		{" new ", 0, true, nil},
+		{" 8 ", 8, false, nil},
+		{"0", 0, false, ErrInvalidSession},
+		{"-2", 0, false, ErrInvalidSession},
+		{"abc", 0, false, ErrInvalidSession},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
-			terminal := New(strings.NewReader(tc.input+"\n"), io.Discard)
-			id, err := terminal.SelectSession(t.Context())
-			if id != tc.id || (tc.id >= 0 && err != nil) {
-				t.Fatalf("输入 %q 得到 ID %d，错误 %v，预期 ID %d", tc.input, id, err, tc.id)
+			var out bytes.Buffer
+			terminal := New(strings.NewReader(tc.input+"\n"), &out)
+			id, isNew, err := terminal.SelectSession(t.Context())
+			if id != tc.id || isNew != tc.isNew || !errors.Is(err, tc.err) {
+				t.Fatalf("输入 %q 得到 (id=%d, isNew=%v, err=%v)，预期 (id=%d, isNew=%v, err=%v)",
+					tc.input, id, isNew, err, tc.id, tc.isNew, tc.err)
+			}
+			if !strings.Contains(out.String(), "sessionID") {
+				t.Fatalf("提示文案应写入输出流 c.out，实际 = %q", out.String())
 			}
 		})
 	}
-	terminal := New(strings.NewReader(""), io.Discard)
-	if _, err := terminal.SelectSession(t.Context()); !errors.Is(err, io.EOF) {
+
+	var out bytes.Buffer
+	terminal := New(strings.NewReader(""), &out)
+	if _, _, err := terminal.SelectSession(t.Context()); !errors.Is(err, io.EOF) {
 		t.Fatalf("预期输入结束，收到 %v", err)
+	}
+
+	wantErr := errors.New("提示写入失败")
+	failing := New(strings.NewReader("new\n"), errWriter{err: wantErr})
+	if _, _, err := failing.SelectSession(t.Context()); !errors.Is(err, wantErr) {
+		t.Fatalf("输出失败应返回 %v，实际 %v", wantErr, err)
 	}
 }
 

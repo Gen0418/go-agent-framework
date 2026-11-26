@@ -1,29 +1,45 @@
-# GoAgentFramework
+# GoAgentFramework (SAISON)
 
-GoAgentFramework 是一个用 Go 从零实现的个人 Agent 学习项目。我想亲手跑通模型请求、流式解析、工具调用和会话存储，理解这些机制如何组成一个 Agent。第一版也用来练习 Windows 桌面 GUI 开发，包括后台任务、流式更新和用户确认。
+GoAgentFramework 是一个用 Go 从零实现的个人 Agent 项目，涵盖模型流式协议解析、工具调用与用户确认、SQLite 会话持久化，以及终端 CLI 和原生桌面 GUI 两种交互形态。项目开发遵循 [Agent 工作原则](AGENTS.md)。
 
 ## 当前状态
 
-项目处于初始化阶段，目前已有项目说明和 [Agent 工作原则](AGENT.md)，MVP 尚未实现。
+核心链路与功能已全部打通，当前已完成架构边界拆分与命名收口，下一阶段将聚焦桌面 GUI 的视觉与交互细节打磨（详见 [GUI 功能开发路线](docs/gui-roadmap.md) 与 [改进项清单](docs/improvements.md)）。
 
-## MVP 范围
+- **CLI 入口 (`cmd/cli`)**：支持新建或按 `sessionID` 恢复会话、流式输出思考与正文、工具调用前交互确认、单轮 Ctrl-C 安全取消与持久化。
+- **桌面 GUI (`cmd/gui`)**：基于 [MyGo](https://github.com/egoist/mygo) 构建原生窗口（应用名 SAISON），支持多会话切换、懒创建新对话、重命名与删除会话、实时流式输出与可折叠思考块、工具执行确认卡片、会话内选项调节（思考开关/强度/工具开关）、应用级配置保存与停止生成。
 
-| 能力 | 第一版目标 |
+## 目录与分层
+
+依赖方向严格自底向上，核心层不反向依赖上层配置或交互实现：
+
+| 目录 | 职责 |
 | --- | --- |
-| 模型接入 | 作为客户端接入 OpenAI 兼容的 Chat Completions 端点。DeepSeek V4.1 Flash 是联调候选，具体端点和模型待定。 |
-| 流式处理 | 增量显示模型正文，组装分片的 `tool_calls` 参数，确认模型响应正常结束且参数有效后进入工具确认。 |
-| Git Bash 工具 | 在 Windows 上展示完整命令和工作目录，经用户确认后才执行。将执行结果或拒绝结果按 `tool_call_id` 回传给模型，继续本轮推理。 |
-| SQLite 历史 | 按会话顺序写入和读取用户消息、模型回复、工具调用及其结果。历史回溯和从历史恢复执行留待后续。 |
-| 桌面 GUI | 单窗口包含输入框、发送按钮、可滚动的文本区和命令确认弹窗。桌面 GUI 工具包待定。 |
+| `internal/apis` | OpenAI 兼容 Chat Completions 流式客户端（`Client`）、SSE 解析、分片 `tool_calls` 组装与合法性校验 |
+| `internal/tools` | 统一工具接口（`Tool`）、注册表（`Registry`）与内建 `Bash` 工具（含参数校验与用户确认回调） |
+| `internal/storage` | SQLite 封装（`Store`）、表结构按 `PRAGMA user_version` 自动迁移、`sessions` / `messages` 持久化与历史加载 |
+| `internal/config` | 环境变量/`.env` 加载（`LoadFromEnv`）及本地 `config.json` 读写（`Load` / `Save`，`0600` 权限原子写入） |
+| `internal/agent` | 对话循环（`Loop`）、按轮传入的 `TurnRequest`、结构化 `OutputEvent` 回调以及中断/取消一致性保障 |
+| `internal/interaction/cli` | 终端交互封装（`CLI`）：会话选择、输入读取、ANSI 分色渲染、历史回放与命令确认 |
+| `internal/interaction/gui` | MyGo 桌面 GUI（按状态、主控、侧边栏、聊天区、消息、输入区、弹框拆分为 7 个文件） |
+| `cmd/cli`、`cmd/gui` | 各自负责组装配置、存储、工具注册表与交互层并启动程序 |
 
-## 实现顺序
+## 核心契约
 
-1. 用模拟模型流和模拟工具调用验证窗口交互。确认正文能增量显示，工具调用能等待用户选择，执行或拒绝后能继续本轮交互。
-2. 接入真实的 Chat Completions 流与 Git Bash，跑通「模型请求执行命令 → 用户确认 → 本地执行 → 结果回传 → 模型继续回复」。
-3. 接入 SQLite，验证程序重启后能读回已保存的会话，核对消息顺序以及工具调用和结果的对应关系。
+- **工具调用与中断一致性**：工具执行前必须经过用户确认；模型流式输出被取消时保留已生成内容落库，工具确认或执行被中断时自动为未完成的 `tool_call_id` 补写 `"已取消"` 结果，确保后续重载会话继续请求模型合法。
+- **配置优先级（GUI）**：`config.json` 非空项 > `.env` / 环境变量 > 内置默认值（`DEEPSEEK_API_KEY`、`DEEPSEEK_ENDPOINT` 见 [.env.example](.env.example)）。`config.json`、`.env`、`agent.db` 均已加入 `.gitignore`，禁止提交到版本库。
 
-首个端到端场景是让模型通过 Git Bash 读取测试文件并回答问题，再读回这次会话的历史。验证也要覆盖拒绝执行、工具参数分片和流中断，确保拒绝或收到半截调用时不会启动 Git Bash。
+## 运行与测试
 
-## 后续探索
+```bash
+# 1. 复制环境变量模板并填入 API Key（CLI 必填；GUI 也可启动后在“设置”中填写）
+cp .env.example .env
 
-初期构想还包括推理字段处理、MCP、上下文与工具输出压缩、模型端点路由及多 Agent 协作。等单 Agent 闭环跑通后，再根据实际遇到的问题决定优先级。
+# 2. 启动 CLI 或桌面 GUI
+go run ./cmd/cli
+go run ./cmd/gui
+
+# 3. 运行静态检查与全仓竞态测试
+go vet ./...
+go test -race ./...
+```

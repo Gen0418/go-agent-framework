@@ -18,28 +18,28 @@ const (
 )
 
 type CLI struct {
-	Scanner     *bufio.Scanner
+	scanner     *bufio.Scanner
 	out         io.Writer
 	inReasoning bool
 }
 
 func New(in io.Reader, out io.Writer) *CLI {
 	return &CLI{
-		Scanner: bufio.NewScanner(in),
+		scanner: bufio.NewScanner(in),
 		out:     out,
 	}
 }
 
 func (c *CLI) ReadInput(ctx context.Context) (string, error) {
-	for c.Scanner.Scan() {
-		text := c.Scanner.Text()
+	for c.scanner.Scan() {
+		text := c.scanner.Text()
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
 		return text, nil
 	}
 
-	if err := c.Scanner.Err(); err != nil {
+	if err := c.scanner.Err(); err != nil {
 		return "", err
 	}
 	return "", io.EOF
@@ -113,36 +113,46 @@ func (c *CLI) Confirm(ctx context.Context, dir, command string) (bool, error) {
 	return false, ctx.Err()
 }
 
-func (c *CLI) PrintHistory(ctx context.Context, msgs []apis.Message) {
+func (c *CLI) PrintHistory(ctx context.Context, msgs []apis.Message) error {
+	defer func() { c.inReasoning = false }()
+
 	for _, msg := range msgs {
 		if msg.Role == "tool" {
-			_ = c.WriteOutput(ctx, agent.OutputEvent{
+			if err := c.WriteOutput(ctx, agent.OutputEvent{
 				Kind:       agent.OutputToolResult,
 				Text:       msg.Content,
 				ToolCallID: msg.ToolCallID,
-			})
+			}); err != nil {
+				return err
+			}
 			continue
 		}
 		if strings.TrimSpace(msg.ReasoningContent) != "" {
-			_ = c.WriteOutput(ctx, agent.OutputEvent{
+			if err := c.WriteOutput(ctx, agent.OutputEvent{
 				Kind: agent.OutputReasoning,
 				Text: "\n" + msg.ReasoningContent,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 		if strings.TrimSpace(msg.Content) != "" {
 			c.inReasoning = false
-			_ = c.WriteOutput(ctx, agent.OutputEvent{
+			if err := c.WriteOutput(ctx, agent.OutputEvent{
 				Kind: agent.OutputContent,
 				Text: "\n" + msg.Content,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 		for i := range msg.ToolCalls {
 			call := msg.ToolCalls[i]
-			_ = c.WriteOutput(ctx, agent.OutputEvent{
+			if err := c.WriteOutput(ctx, agent.OutputEvent{
 				Kind:     agent.OutputToolCall,
 				ToolCall: &call,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
-	c.inReasoning = false
+	return nil
 }
