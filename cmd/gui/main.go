@@ -24,13 +24,13 @@ func main() {
 		ReasoningEffort: "low",
 		Tools:           tools.DefaultRegistry().Definitions(),
 	}
-	db, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
+	store, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer store.Close()
 
-	if err := gui.Run(ctx, db, cfg, cfgPath, opts); err != nil {
+	if err := gui.Run(ctx, store, cfg, cfgPath, opts); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -2,7 +2,6 @@ package gui
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -279,7 +278,7 @@ func (a *app) submitButton(c *ui.Context, sessionId int64, state *sessionState) 
 
 func (a *app) lazyCreateSession(input string) (int64, error) {
 	title := makeSessionTitle(input)
-	id, err := storage.CreateSession(a.ctx, a.db, title)
+	id, err := a.store.CreateSession(a.ctx, title)
 	if err != nil {
 		return 0, fmt.Errorf("新建会话失败: %w", err)
 	}
@@ -324,7 +323,7 @@ func (a *app) selectSession(selectedId int64) error {
 	state := a.sessionState(selectedId)
 
 	if !state.historyLoaded { // 未加载指定 sessionId 的历史时
-		msgs, err := agent.LoadHistory(a.ctx, a.db, selectedId)
+		msgs, err := a.store.LoadHistory(a.ctx, selectedId)
 		if err != nil {
 			state.err = fmt.Errorf("加载会话历史失败: %w", err)
 			return err
@@ -350,7 +349,7 @@ func (a *app) renameSession(sessionId int64, title string) error {
 		return errors.New("会话标题不能为空")
 	}
 
-	if err := storage.UpdateSessionTitle(a.ctx, a.db, sessionId, cleaned); err != nil {
+	if err := a.store.UpdateSessionTitle(a.ctx, sessionId, cleaned); err != nil {
 		return fmt.Errorf("重命名会话失败: %w", err)
 	}
 
@@ -370,7 +369,7 @@ func (a *app) deleteSession(sessionId int64) error {
 		state.resolveConfirm(false)
 	}
 
-	if err := storage.DeleteSession(a.ctx, a.db, sessionId); err != nil {
+	if err := a.store.DeleteSession(a.ctx, sessionId); err != nil {
 		a.err = fmt.Errorf("删除会话失败: %w", err)
 		return a.err
 	}
@@ -422,7 +421,7 @@ func (a *app) submit(submitId int64, submitInputText string) {
 
 	submitLoop := submitState.loop // 取得指定 session 的 loop
 	if submitLoop == nil {         // loop 为空，新建
-		submitLoop = agent.NewAgentLoop(a.cfg, a.db, submitState.opts)
+		submitLoop = agent.NewAgentLoop(a.cfg, a.store, submitState.opts)
 		if err := submitLoop.BindSession(a.ctx, submitId); err != nil { // 绑定 loop 至 session
 			submitState.err = err
 			return
@@ -506,8 +505,8 @@ func (a *app) submit(submitId int64, submitInputText string) {
 	}()
 }
 
-func Run(ctx context.Context, db *sql.DB, cfg config.Config, cfgPath string, opts apis.StreamOptions) error {
-	sessions, err := storage.ListSessions(ctx, db)
+func Run(ctx context.Context, store *storage.Store, cfg config.Config, cfgPath string, opts apis.StreamOptions) error {
+	sessions, err := store.ListSessions(ctx)
 	if err != nil {
 		return err
 	}
@@ -517,7 +516,7 @@ func Run(ctx context.Context, db *sql.DB, cfg config.Config, cfgPath string, opt
 	a := &app{
 		ctx:         appCtx,
 		cancel:      cancel,
-		db:          db,
+		store:       store,
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 		defaultOpts: opts,

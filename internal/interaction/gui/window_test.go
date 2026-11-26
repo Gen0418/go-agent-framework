@@ -77,20 +77,20 @@ func TestSessionOptsPopover(t *testing.T) {
 }
 
 func TestAppRenameSession(t *testing.T) {
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { store.Close() })
 
-	id, err := storage.CreateSession(t.Context(), db, "原标题")
+	id, err := store.CreateSession(t.Context(), "原标题")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	a := &app{
-		ctx: t.Context(),
-		db:  db,
+		ctx:   t.Context(),
+		store: store,
 		sessions: sessionList{
 			list:       []storage.Session{{Id: id, Title: "原标题"}},
 			selectedId: id,
@@ -110,7 +110,7 @@ func TestAppRenameSession(t *testing.T) {
 	if a.sessions.list[0].Title != "新的 标题" {
 		t.Fatalf("内存标题 = %q，预期 新的 标题", a.sessions.list[0].Title)
 	}
-	gotDB, err := storage.QuerySession(t.Context(), db, id)
+	gotDB, err := store.QuerySession(t.Context(), id)
 	if err != nil || gotDB != "新的 标题" {
 		t.Fatalf("数据库标题 = %q, err = %v", gotDB, err)
 	}
@@ -122,24 +122,23 @@ func TestAppRenameSession(t *testing.T) {
 }
 
 func TestAppDeleteSession(t *testing.T) {
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { store.Close() })
 
-	id1, err := storage.CreateSession(t.Context(), db, "会话1")
+	id1, err := store.CreateSession(t.Context(), "会话1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := storage.CreateSession(t.Context(), db, "会话2")
+	id2, err := store.CreateSession(t.Context(), "会话2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.CreateMessage(t.Context(), db, storage.Message{
-		SessionId: id1,
-		Role:      "user",
-		Content:   "会话1历史消息",
+	if err := store.AppendMessage(t.Context(), id1, apis.Message{
+		Role:    "user",
+		Content: "会话1历史消息",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -147,8 +146,8 @@ func TestAppDeleteSession(t *testing.T) {
 	canceled := false
 	confirm := &confirmToolCall{dir: "/tmp", command: "ls", reply: make(chan bool, 1)}
 	a := &app{
-		ctx: t.Context(),
-		db:  db,
+		ctx:   t.Context(),
+		store: store,
 		sessions: sessionList{
 			list: []storage.Session{
 				{Id: id2, Title: "会话2"},
@@ -178,7 +177,7 @@ func TestAppDeleteSession(t *testing.T) {
 	if _, exists := a.sessionStates[id2]; exists {
 		t.Fatal("删除后应清理 sessionStates[id2]")
 	}
-	if _, err := storage.QuerySession(t.Context(), db, id2); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := store.QuerySession(t.Context(), id2); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("删除后查询会话2 = %v，预期 sql.ErrNoRows", err)
 	}
 	if a.sessions.selectedId != id1 {
@@ -199,24 +198,24 @@ func TestAppDeleteSession(t *testing.T) {
 }
 
 func TestSidebarSessionMenuAndModals(t *testing.T) {
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { store.Close() })
 
-	id1, err := storage.CreateSession(t.Context(), db, "会话1")
+	id1, err := store.CreateSession(t.Context(), "会话1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := storage.CreateSession(t.Context(), db, "会话2")
+	id2, err := store.CreateSession(t.Context(), "会话2")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	a := &app{
-		ctx: t.Context(),
-		db:  db,
+		ctx:   t.Context(),
+		store: store,
 		sessions: sessionList{
 			list: []storage.Session{
 				{Id: id2, Title: "会话2"},
@@ -277,21 +276,21 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	if len(a.sessions.list) != 1 || a.sessions.selectedId != id1 {
 		t.Fatalf("删除后状态不符: selectedId=%d, list=%+v", a.sessions.selectedId, a.sessions.list)
 	}
-	if _, err := storage.QuerySession(t.Context(), db, id2); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := store.QuerySession(t.Context(), id2); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("删除后数据库仍能查到会话 %d: %v", id2, err)
 	}
 }
 
 func TestSubmitRejectsEmptyAPIKey(t *testing.T) {
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { store.Close() })
 
 	a := &app{
 		ctx:           t.Context(),
-		db:            db,
+		store:         store,
 		cfg:           config.Config{APIKey: "   "},
 		sessionStates: make(map[int64]*sessionState),
 	}
@@ -306,7 +305,7 @@ func TestSubmitRejectsEmptyAPIKey(t *testing.T) {
 	if draft.sessionRunning || len(draft.messages) != 0 || draft.inputText != "你好" {
 		t.Fatalf("拦截后不应修改草稿状态: running=%v, msgs=%d, input=%q", draft.sessionRunning, len(draft.messages), draft.inputText)
 	}
-	sessions, err := storage.ListSessions(t.Context(), db)
+	sessions, err := store.ListSessions(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

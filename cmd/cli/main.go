@@ -28,14 +28,14 @@ func main() {
 		ReasoningEffort: "low",
 		Tools:           tools.DefaultRegistry().Definitions(),
 	}
-	db, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
+	store, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer store.Close()
 
 	terminal := cli.NewCli(os.Stdin, os.Stdout)
-	mainLoop := agent.NewAgentLoop(cfg, db, opts)
+	mainLoop := agent.NewAgentLoop(cfg, store, opts)
 	selectDone := false // 选择或新建会话
 	for !selectDone {
 		sessionId, err := terminal.SelectSession(ctx)

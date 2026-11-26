@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,9 +12,15 @@ import (
 
 	"go-agent-framework/internal/apis"
 	"go-agent-framework/internal/config"
-	"go-agent-framework/internal/storage"
 	"go-agent-framework/internal/tools"
 )
+
+// Store 抽象会话与消息持久化依赖
+type Store interface {
+	CreateSession(ctx context.Context, title string) (int64, error)
+	AppendMessage(ctx context.Context, sessionId int64, msg apis.Message) error
+	LoadHistory(ctx context.Context, sessionId int64) ([]apis.Message, error)
+}
 
 type AgentLoop struct {
 	SessionId int64 // 绑定会话Id
@@ -24,7 +28,7 @@ type AgentLoop struct {
 	client    *apis.Client
 	tools     *tools.Registry
 	msgs      []apis.Message // 本会话的对话历史
-	db        *sql.DB
+	store     Store
 	opts      apis.StreamOptions
 }
 
@@ -40,9 +44,9 @@ const (
 	IsToolContent
 )
 
-func NewAgentLoop(cfg config.Config, db *sql.DB, opts apis.StreamOptions) *AgentLoop {
+func NewAgentLoop(cfg config.Config, store Store, opts apis.StreamOptions) *AgentLoop {
 	l := &AgentLoop{
-		db:    db,
+		store: store,
 		tools: tools.DefaultRegistry(),
 	}
 	l.SetConfig(cfg)
@@ -67,7 +71,7 @@ func (l *AgentLoop) SetConfig(cfg config.Config) {
 }
 
 func (l *AgentLoop) NewSession(ctx context.Context, title string) error {
-	sessionId, err := storage.CreateSession(ctx, l.db, title)
+	sessionId, err := l.store.CreateSession(ctx, title)
 	if err != nil {
 		return err
 	}
@@ -83,7 +87,7 @@ func (l *AgentLoop) History() []apis.Message {
 
 // 将 Loop 绑定到会话
 func (l *AgentLoop) BindSession(ctx context.Context, sessionId int64) error {
-	msgs, err := LoadHistory(ctx, l.db, sessionId)
+	msgs, err := l.store.LoadHistory(ctx, sessionId)
 	if err != nil {
 		return err
 	}
@@ -92,42 +96,6 @@ func (l *AgentLoop) BindSession(ctx context.Context, sessionId int64) error {
 	l.msgs = msgs
 
 	return nil
-}
-
-func LoadHistory(ctx context.Context, db *sql.DB, sessionId int64) ([]apis.Message, error) {
-	// 查询sessionId
-	_, err := storage.QuerySession(ctx, db, sessionId)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("sessionId %d 不存在: %w", sessionId, err)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// 载入msgs
-	msgStorages, err := storage.QueryMessages(ctx, db, sessionId)
-	if err != nil {
-		return nil, err
-	}
-
-	var msgs []apis.Message
-	for _, msgStorage := range msgStorages {
-		var calls []apis.ToolCall
-		if msgStorage.ToolCalls != "" {
-			if err := json.Unmarshal([]byte(msgStorage.ToolCalls), &calls); err != nil {
-				return nil, err
-			}
-		}
-		msgs = append(msgs, apis.Message{
-			Role:             msgStorage.Role,
-			Content:          msgStorage.Content,
-			ReasoningContent: msgStorage.ReasoningContent,
-			ToolCalls:        calls,
-			ToolCallId:       msgStorage.ToolCallId,
-		})
-	}
-
-	return msgs, nil
 }
 
 // 推进对话轮次
@@ -317,28 +285,10 @@ func (l *AgentLoop) readReply(ctx context.Context, outputFunc OutputFunc) (apis.
 
 // 将 msg 追加至对话历史，并持久化储存
 func (l *AgentLoop) appendMessage(ctx context.Context, msg apis.Message) error {
-	callsString := "[]"
-	if len(msg.ToolCalls) > 0 {
-		data, err := json.Marshal(msg.ToolCalls)
-		if err != nil {
-			return fmt.Errorf("追加对话历史，工具调用转换失败: %w", err)
-		}
-		callsString = string(data)
-	}
-
-	msgStorage := storage.Message{
-		SessionId:        l.SessionId,
-		Role:             msg.Role,
-		Content:          msg.Content,
-		ReasoningContent: msg.ReasoningContent,
-		ToolCalls:        callsString,
-		ToolCallId:       msg.ToolCallId,
-	}
-	if err := storage.CreateMessage(ctx, l.db, msgStorage); err != nil { // 储存模型输出
+	if err := l.store.AppendMessage(ctx, l.SessionId, msg); err != nil {
 		return fmt.Errorf("追加对话历史，储存失败: %w", err)
 	}
 
 	l.msgs = append(l.msgs, msg)
-
 	return nil
 }

@@ -67,12 +67,12 @@ func newTestLoop(t *testing.T, exchanges ...exchange) *AgentLoop {
 		}
 	})
 
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
-	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, db, apis.StreamOptions{})
+	t.Cleanup(func() { store.Close() })
+	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, store, apis.StreamOptions{})
 	if err := loop.NewSession(t.Context(), "测试会话"); err != nil {
 		t.Fatal(err)
 	}
@@ -84,27 +84,15 @@ func assertHistory(t *testing.T, loop *AgentLoop, want []apis.Message) {
 	if !reflect.DeepEqual(loop.msgs, want) {
 		t.Errorf("内存历史 = %+v，预期 %+v", loop.msgs, want)
 	}
-	rows, err := storage.QueryMessages(t.Context(), loop.db, loop.SessionId)
+	stored, err := loop.store.LoadHistory(t.Context(), loop.SessionId)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != len(want) {
-		t.Fatalf("数据库中有 %d 条消息，预期 %d 条", len(rows), len(want))
+	if len(want) == 0 && len(stored) == 0 {
+		return
 	}
-	for i, msg := range want {
-		calls := msg.ToolCalls
-		if calls == nil {
-			calls = []apis.ToolCall{}
-		}
-		var storedCalls []apis.ToolCall
-		row := rows[i]
-		if err := json.Unmarshal([]byte(row.ToolCalls), &storedCalls); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(storedCalls, calls) || row.ToolCallId != msg.ToolCallId ||
-			row.Role != msg.Role || row.Content != msg.Content || row.ReasoningContent != msg.ReasoningContent {
-			t.Errorf("数据库第 %d 条消息 = %+v，预期 %+v", i+1, row, msg)
-		}
+	if !reflect.DeepEqual(stored, want) {
+		t.Errorf("数据库历史 = %+v，预期 %+v", stored, want)
 	}
 }
 
@@ -217,16 +205,26 @@ func TestRunTurnInputEOF(t *testing.T) {
 	assertHistory(t, loop, []apis.Message{})
 }
 
+type rejectToolStore struct {
+	Store
+	err error
+}
+
+func (s rejectToolStore) AppendMessage(ctx context.Context, sessionId int64, msg apis.Message) error {
+	if msg.Role == "tool" {
+		return s.err
+	}
+	return s.Store.AppendMessage(ctx, sessionId, msg)
+}
+
 func TestRunTurnToolWriteFailure(t *testing.T) {
 	user := apis.Message{Role: "user", Content: "调用工具"}
 	loop := newTestLoop(t, exchange{[]apis.Message{user}, callStream + "\n\n" + callFinishEvent + doneEvent})
-	_, err := loop.db.ExecContext(t.Context(), `CREATE TRIGGER reject_tool BEFORE INSERT ON messages
-		WHEN NEW.role = 'tool' BEGIN SELECT RAISE(ABORT, '工具结果写入失败'); END`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = loop.RunTurn(t.Context(), inputOnce(t, user.Content), discardOutput, func(context.Context, string, string) (bool, error) { return false, nil })
-	if err == nil || !strings.Contains(err.Error(), "工具结果写入失败") {
+	wantErr := errors.New("工具结果写入失败")
+	loop.store = rejectToolStore{Store: loop.store, err: wantErr}
+
+	err := loop.RunTurn(t.Context(), inputOnce(t, user.Content), discardOutput, func(context.Context, string, string) (bool, error) { return false, nil })
+	if !errors.Is(err, wantErr) {
 		t.Fatalf("预期工具结果写入错误，收到 %v", err)
 	}
 	if len(loop.msgs) != 2 || loop.msgs[1].Role != "assistant" {
@@ -303,7 +301,7 @@ func TestNewSessionStartsSeparateHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertHistory(t, loop, []apis.Message{second, {Role: "assistant", Content: "答复", ReasoningContent: "思考"}})
-	rows, err := storage.QueryMessages(t.Context(), loop.db, firstID)
+	rows, err := loop.store.LoadHistory(t.Context(), firstID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +392,7 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			}
 
 			// 重新绑定会话并继续下一轮，确认持久化历史合法可续聊
-			reloaded := NewAgentLoop(loop.cfg, loop.db, loop.opts)
+			reloaded := NewAgentLoop(loop.cfg, loop.store, loop.opts)
 			if err := reloaded.BindSession(t.Context(), loop.SessionId); err != nil {
 				t.Fatal(err)
 			}
@@ -475,7 +473,7 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	if err := loop.appendMessage(ctx, apis.Message{Role: "user", Content: "独立的话题"}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := storage.QueryMessages(ctx, loop.db, otherID)
+	before, err := loop.store.LoadHistory(ctx, otherID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,20 +488,33 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := storage.QueryMessages(ctx, loop.db, targetID)
+	rows, err := loop.store.LoadHistory(ctx, targetID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != len(request)+1 || rows[len(history)].Content != next.Content || rows[len(request)].Content != "答复" {
 		t.Fatalf("续聊后的目标会话 = %+v", rows)
 	}
-	after, err := storage.QueryMessages(ctx, loop.db, otherID)
+	after, err := loop.store.LoadHistory(ctx, otherID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("其他会话的记录发生变化：%+v", after)
 	}
+}
+
+type failingLoadStore struct {
+	Store
+	failId int64
+	err    error
+}
+
+func (s failingLoadStore) LoadHistory(ctx context.Context, sessionId int64) ([]apis.Message, error) {
+	if sessionId == s.failId {
+		return nil, s.err
+	}
+	return s.Store.LoadHistory(ctx, sessionId)
 }
 
 func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
@@ -515,17 +526,14 @@ func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	brokenID, err := storage.CreateSession(ctx, loop.db, "历史损坏")
+	brokenID, err := loop.store.CreateSession(ctx, "历史损坏")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, row := range []storage.Message{
-		{SessionId: brokenID, Role: "user", Content: "有效的第一条"},
-		{SessionId: brokenID, Role: "assistant", ToolCalls: "["},
-	} {
-		if err := storage.CreateMessage(ctx, loop.db, row); err != nil {
-			t.Fatal(err)
-		}
+	loop.store = failingLoadStore{
+		Store:  loop.store,
+		failId: brokenID,
+		err:    errors.New("历史记录损坏"),
 	}
 
 	for _, tc := range []struct {
@@ -533,7 +541,7 @@ func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 		id   int64
 	}{
 		{"会话不存在", brokenID + 1},
-		{"工具调用损坏", brokenID},
+		{"读取历史失败", brokenID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := loop.BindSession(ctx, tc.id); err == nil {
@@ -553,7 +561,7 @@ func TestBindEmptySession(t *testing.T) {
 	if err := loop.appendMessage(ctx, apis.Message{Role: "user", Content: "旧消息"}); err != nil {
 		t.Fatal(err)
 	}
-	emptyID, err := storage.CreateSession(ctx, loop.db, "空会话")
+	emptyID, err := loop.store.CreateSession(ctx, "空会话")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -589,14 +597,14 @@ func TestSetOptsAppliesToNextTurn(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { store.Close() })
 
 	tools := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
-	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, db, apis.StreamOptions{
+	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, store, apis.StreamOptions{
 		Thinking:        true,
 		ReasoningEffort: "high",
 		Tools:           tools,
@@ -681,17 +689,17 @@ func TestSetConfigAppliesToNextTurn(t *testing.T) {
 	server1 := makeServer(&firstGot)
 	server2 := makeServer(&secondGot)
 
-	db, err := storage.Open(t.Context(), ":memory:")
+	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { store.Close() })
 
 	loop := NewAgentLoop(config.Config{
 		APIKey:       "key-1",
 		Endpoint:     server1.URL,
 		DefaultModel: "model-1",
-	}, db, apis.StreamOptions{})
+	}, store, apis.StreamOptions{})
 	if err := loop.NewSession(t.Context(), "配置切换测试"); err != nil {
 		t.Fatal(err)
 	}

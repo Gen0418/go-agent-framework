@@ -1,7 +1,5 @@
 package storage
 
-type Schema [][]string
-
 var latestVersion = len(schema)
 
 var schema = [][]string{
@@ -9,8 +7,6 @@ var schema = [][]string{
 }
 
 var rawV1 = []string{
-	`PRAGMA user_version = 1;`,
-
 	`CREATE TABLE IF NOT EXISTS sessions (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       title      TEXT NOT NULL DEFAULT '',

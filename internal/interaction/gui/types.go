@@ -2,7 +2,6 @@ package gui
 
 import (
 	"context"
-	"database/sql"
 	"slices"
 	"strings"
 
@@ -22,7 +21,7 @@ type app struct {
 	// 应用级依赖
 	ctx         context.Context
 	cancel      context.CancelFunc
-	db          *sql.DB
+	store       *storage.Store
 	win         *mygo.Window
 	cfg         config.Config      // 应用级配置项(APIKey/Endpoint/DefaultModel)
 	cfgPath     string             // 本地配置文件路径

@@ -8,7 +8,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func Open(ctx context.Context, path string) (*sql.DB, error) {
+// Store 封装 SQLite 数据库句柄，对外隐藏底层 *sql.DB 与序列化细节
+type Store struct {
+	db *sql.DB
+}
+
+// Open 打开并按版本迁移 SQLite 数据库
+func Open(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库 %s 失败: %w", path, err)
@@ -19,16 +25,28 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("数据库 %s 连接异常: %w", path, err)
 	}
+	if _, err = db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("数据库 %s 启用外键约束失败: %w", path, err)
+	}
 
 	if err = syncDBVersion(ctx, db); err != nil { // 表版本同步
 		db.Close()
 		return nil, fmt.Errorf("数据库 %s 同步版本异常: %w", path, err)
 	}
 
-	return db, nil
+	return &Store{db: db}, nil
 }
 
-// 根据 schemas 中的ddl，自动初始化表结构
+// Close 关闭底层数据库连接
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+// 根据 schemas 中的 ddl 自动初始化并迁移表结构
 func syncDBVersion(ctx context.Context, db *sql.DB) error {
 	var version int
 
@@ -48,14 +66,16 @@ func syncDBVersion(ctx context.Context, db *sql.DB) error {
 	}
 	defer tx.Rollback()
 
-	for version < latestVersion { //
-		for _, s := range schema[version] {
-			_, err = tx.ExecContext(ctx, s)
-			if err != nil {
+	for version < latestVersion {
+		for _, stmt := range schema[version] {
+			if _, err = tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("初始化数据库错误: %w", err)
 			}
 		}
 		version++
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d;", version)); err != nil {
+			return fmt.Errorf("更新数据库版本失败: %w", err)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {

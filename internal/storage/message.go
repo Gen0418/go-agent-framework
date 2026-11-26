@@ -1,0 +1,120 @@
+package storage
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"go-agent-framework/internal/apis"
+)
+
+// AppendMessage 追加一条消息并刷新所属会话的 updated_at
+func (s *Store) AppendMessage(ctx context.Context, sessionId int64, msg apis.Message) error {
+	callsJSON := "[]"
+	if len(msg.ToolCalls) > 0 {
+		data, err := json.Marshal(msg.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("序列化 tool_calls 失败: %w", err)
+		}
+		callsJSON = string(data)
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("开启写入消息事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO messages
+		(session_id, role, content, reasoning_content, tool_calls, tool_call_id)
+		VALUES (?, ?, ?, ?, ?, ?);`,
+		sessionId,
+		msg.Role,
+		msg.Content,
+		msg.ReasoningContent,
+		callsJSON,
+		msg.ToolCallId,
+	); err != nil {
+		return fmt.Errorf("插入 messages 失败: %w", err)
+	}
+
+	res, err := tx.ExecContext(
+		ctx,
+		`UPDATE sessions
+		SET updated_at = datetime('now')
+		WHERE id = ?;`,
+		sessionId,
+	)
+	if err != nil {
+		return fmt.Errorf("更新 sessions 时间失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("检查 sessions 更新行数失败: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("会话 %d 不存在: %w", sessionId, sql.ErrNoRows)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交写入消息事务失败: %w", err)
+	}
+	return nil
+}
+
+// LoadHistory 校验会话存在并按消息顺序载入历史记录
+func (s *Store) LoadHistory(ctx context.Context, sessionId int64) ([]apis.Message, error) {
+	if _, err := s.QuerySession(ctx, sessionId); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("sessionId %d 不存在: %w", sessionId, err)
+		}
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT role, content, reasoning_content, tool_calls, tool_call_id
+		FROM messages
+		WHERE session_id = ?
+		ORDER BY id;`,
+		sessionId,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询 messages 失败: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []apis.Message
+	for rows.Next() {
+		var msg apis.Message
+		var rawCalls string
+		if err := rows.Scan(
+			&msg.Role,
+			&msg.Content,
+			&msg.ReasoningContent,
+			&rawCalls,
+			&msg.ToolCallId,
+		); err != nil {
+			return nil, fmt.Errorf("扫描 messages 失败: %w", err)
+		}
+
+		if rawCalls != "" {
+			var calls []apis.ToolCall
+			if err := json.Unmarshal([]byte(rawCalls), &calls); err != nil {
+				return nil, fmt.Errorf("解析 tool_calls 失败: %w", err)
+			}
+			if len(calls) > 0 {
+				msg.ToolCalls = calls
+			}
+		}
+		msgs = append(msgs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历 messages 失败: %w", err)
+	}
+	return msgs, nil
+}
