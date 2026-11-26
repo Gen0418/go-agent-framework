@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go-agent-framework/internal/apis"
 )
@@ -106,6 +107,112 @@ func TestBashRunConfirmAndExecution(t *testing.T) {
 		})
 		if err != nil || !strings.Contains(got, "exit status 7") || !strings.Contains(got, "diagnostic") {
 			t.Fatalf("结果 = %q，错误 = %v", got, err)
+		}
+	})
+}
+
+func TestExecBashTimeout(t *testing.T) {
+	_, err := execBashWithTimeout(t.Context(), t.TempDir(), "sleep 5", 80*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("超时命令返回错误 = %v，预期包装 context.DeadlineExceeded", err)
+	}
+}
+
+func TestFindWindowsBash(t *testing.T) {
+	makeFileSet := func(paths ...string) func(string) bool {
+		set := make(map[string]bool, len(paths))
+		for _, p := range paths {
+			set[strings.ToLower(p)] = true
+		}
+		return func(p string) bool {
+			return set[strings.ToLower(p)]
+		}
+	}
+	makeEnv := func(m map[string]string) func(string) string {
+		return func(k string) string { return m[k] }
+	}
+	makeLook := func(m map[string]string) func(string) (string, error) {
+		return func(name string) (string, error) {
+			if p, ok := m[name]; ok {
+				return p, nil
+			}
+			return "", errors.New("not found")
+		}
+	}
+
+	t.Run("环境变量显式路径优先", func(t *testing.T) {
+		want := `D:\Custom\Git\bin\bash.exe`
+		got, err := findWindowsBash(
+			makeEnv(map[string]string{bashEnvPath: want}),
+			makeLook(nil),
+			makeFileSet(want),
+		)
+		if err != nil || got != want {
+			t.Fatalf("got = (%q, %v)，预期 %q", got, err, want)
+		}
+	})
+
+	t.Run("环境变量路径不存在直接报错", func(t *testing.T) {
+		_, err := findWindowsBash(
+			makeEnv(map[string]string{bashEnvPath: `D:\Missing\bash.exe`}),
+			makeLook(nil),
+			makeFileSet(),
+		)
+		if err == nil || !strings.Contains(err.Error(), bashEnvPath) {
+			t.Fatalf("预期环境变量路径错误，实际 = %v", err)
+		}
+	})
+
+	t.Run("通过 git 位置推算同目录 Git Bash 并优先 bin 路径", func(t *testing.T) {
+		want := `D:\Tools\Git\bin\bash.exe`
+		got, err := findWindowsBash(
+			makeEnv(nil),
+			makeLook(map[string]string{
+				"git":  `D:\Tools\Git\cmd\git.exe`,
+				"bash": `C:\Windows\System32\bash.exe`,
+			}),
+			makeFileSet(want, `D:\Tools\Git\usr\bin\bash.exe`, `C:\Windows\System32\bash.exe`),
+		)
+		if err != nil || got != want {
+			t.Fatalf("got = (%q, %v)，预期 %q", got, err, want)
+		}
+	})
+
+	t.Run("git 不在 PATH 时回退 ProgramFiles 并跳过 System32 WSL bash", func(t *testing.T) {
+		want := `C:\Program Files\Git\bin\bash.exe`
+		got, err := findWindowsBash(
+			makeEnv(map[string]string{"ProgramFiles": `C:\Program Files`}),
+			makeLook(map[string]string{"bash": `C:\WINDOWS\System32\bash.exe`}),
+			makeFileSet(want, `C:\WINDOWS\System32\bash.exe`),
+		)
+		if err != nil || got != want {
+			t.Fatalf("got = (%q, %v)，预期 %q", got, err, want)
+		}
+	})
+
+	t.Run("仅存在 System32 WSL bash 时拒绝命中并返回清晰错误", func(t *testing.T) {
+		_, err := findWindowsBash(
+			makeEnv(nil),
+			makeLook(map[string]string{
+				"bash.exe": `C:\Windows\System32\bash.exe`,
+				"bash":     `C:\Windows\System32\bash.exe`,
+			}),
+			makeFileSet(`C:\Windows\System32\bash.exe`),
+		)
+		if err == nil || !strings.Contains(err.Error(), "Git Bash") {
+			t.Fatalf("仅存在 System32 bash 时应报错提示安装 Git Bash，实际 = %v", err)
+		}
+	})
+
+	t.Run("PATH 中非 System32 的独立 bash 可作为兜底", func(t *testing.T) {
+		want := `C:\msys64\usr\bin\bash.exe`
+		got, err := findWindowsBash(
+			makeEnv(nil),
+			makeLook(map[string]string{"bash.exe": want}),
+			makeFileSet(want),
+		)
+		if err != nil || got != want {
+			t.Fatalf("got = (%q, %v)，预期 %q", got, err, want)
 		}
 	})
 }
