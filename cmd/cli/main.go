@@ -23,10 +23,16 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
+	reg := tools.DefaultRegistry()
 	opts := apis.StreamOptions{
 		Thinking:        true,
 		ReasoningEffort: "low",
-		Tools:           tools.DefaultRegistry().Definitions(),
+		Tools:           reg.Definitions(),
+	}
+	client := &apis.Client{
+		Endpoint: cfg.Endpoint,
+		APIKey:   cfg.APIKey,
+		Model:    cfg.DefaultModel,
 	}
 	store, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
 	if err != nil {
@@ -35,7 +41,7 @@ func main() {
 	defer store.Close()
 
 	terminal := cli.NewCli(os.Stdin, os.Stdout)
-	mainLoop := agent.NewAgentLoop(cfg, store, opts)
+	mainLoop := agent.NewAgentLoop(store, reg)
 	selectDone := false // 选择或新建会话
 	for !selectDone {
 		sessionId, err := terminal.SelectSession(ctx)
@@ -64,8 +70,7 @@ func main() {
 	}
 
 	for {
-		err := mainLoop.RunTurn(ctx, terminal.ReadInput, terminal.WriteOutput, terminal.ConfirmOperateByUser)
-		fmt.Println()
+		input, err := terminal.ReadInput(ctx)
 		if errors.Is(err, io.EOF) {
 			fmt.Println("会话终止")
 			break
@@ -73,6 +78,21 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+
+		if err := mainLoop.RunTurn(ctx, agent.TurnRequest{
+			Input:   input,
+			Client:  client,
+			Opts:    opts,
+			Output:  terminal.WriteOutput,
+			Confirm: terminal.ConfirmOperateByUser,
+		}); err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Println("\n工具确认已中断，会话终止")
+				break
+			}
+			log.Fatal(err)
+		}
+		fmt.Println()
 	}
 
 }

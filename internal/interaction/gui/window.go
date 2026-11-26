@@ -421,31 +421,29 @@ func (a *app) submit(submitId int64, submitInputText string) {
 
 	submitLoop := submitState.loop // 取得指定 session 的 loop
 	if submitLoop == nil {         // loop 为空，新建
-		submitLoop = agent.NewAgentLoop(a.cfg, a.store, submitState.opts)
+		submitLoop = agent.NewAgentLoop(a.store, nil)
 		if err := submitLoop.BindSession(a.ctx, submitId); err != nil { // 绑定 loop 至 session
 			submitState.err = err
 			return
 		}
 		submitState.loop = submitLoop
-	} else {
-		submitLoop.SetConfig(a.cfg)
-		submitLoop.SetOpts(submitState.opts) // 同步最新配置与会话选项给已有 loop
 	}
 
-	inputFunc := func(ctx context.Context) (string, error) {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		return submitInputText, nil
+	turnClient := &apis.Client{
+		Endpoint: a.cfg.Endpoint,
+		APIKey:   a.cfg.APIKey,
+		Model:    a.cfg.DefaultModel,
 	}
-	outputFunc := func(ctx context.Context, chunk string, role agent.OutputRole) error {
+	turnOpts := submitState.opts
+	turnOpts.Tools = slices.Clone(turnOpts.Tools)
+
+	outputFunc := func(ctx context.Context, event agent.OutputEvent) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
 		a.win.Update(func() { // 更新窗口
-			submitState.appendStreamChunk(role, chunk)
+			submitState.appendStreamEvent(event)
 		})
 
 		return nil
@@ -490,7 +488,13 @@ func (a *app) submit(submitId int64, submitInputText string) {
 
 	go func() { // 后台 session 运行
 		defer cancel()
-		err := submitLoop.RunTurn(turnCtx, inputFunc, outputFunc, confirmFunc)
+		err := submitLoop.RunTurn(turnCtx, agent.TurnRequest{
+			Input:   submitInputText,
+			Client:  turnClient,
+			Opts:    turnOpts,
+			Output:  outputFunc,
+			Confirm: confirmFunc,
+		})
 
 		a.win.Update(func() {
 			submitState.sessionRunning = false

@@ -75,12 +75,16 @@ type sessionState struct {
 	err            error // 会话级错误
 }
 
-// 向 curReply 中流式写入
-func (s *sessionState) appendStreamChunk(role agent.OutputRole, chunk string) {
-	if role == agent.IsToolContent { // 工具结果
-		// 	工具调用非流式，直接追加
+// 按结构化事件追加流式输出
+func (s *sessionState) appendStreamEvent(event agent.OutputEvent) {
+	if event.Kind == agent.OutputToolResult { // 工具结果
+		// 工具调用非流式，直接追加
 		s.messages = append(s.messages, &chatMessage{
-			Message: apis.Message{Role: "tool", Content: chunk},
+			Message: apis.Message{
+				Role:       "tool",
+				Content:    event.Text,
+				ToolCallId: event.ToolCallId,
+			},
 		})
 		s.curReply = nil
 		return
@@ -93,11 +97,15 @@ func (s *sessionState) appendStreamChunk(role agent.OutputRole, chunk string) {
 		s.messages = append(s.messages, s.curReply)
 	}
 
-	switch role {
-	case agent.IsReasoningContent: // 思考内容
-		s.curReply.ReasoningContent += chunk
-	case agent.IsContent: // 输出内容
-		s.curReply.Content += chunk
+	switch event.Kind {
+	case agent.OutputReasoning: // 思考内容
+		s.curReply.ReasoningContent += event.Text
+	case agent.OutputContent: // 输出内容
+		s.curReply.Content += event.Text
+	case agent.OutputToolCall: // 工具调用
+		if event.ToolCall != nil {
+			s.curReply.ToolCalls = append(s.curReply.ToolCalls, *event.ToolCall)
+		}
 	}
 }
 

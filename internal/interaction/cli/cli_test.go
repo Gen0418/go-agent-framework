@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go-agent-framework/internal/agent"
 	"go-agent-framework/internal/apis"
 )
 
@@ -74,5 +75,27 @@ func TestSelectSession(t *testing.T) {
 	terminal := NewCli(strings.NewReader(""), io.Discard)
 	if _, err := terminal.SelectSession(t.Context()); !errors.Is(err, io.EOF) {
 		t.Fatalf("预期输入结束，收到 %v", err)
+	}
+}
+
+func TestWriteOutputReasoningToContentNewline(t *testing.T) {
+	var out bytes.Buffer
+	terminal := NewCli(strings.NewReader(""), &out)
+
+	events := []agent.OutputEvent{
+		{Kind: agent.OutputReasoning, Text: "先想"},
+		{Kind: agent.OutputReasoning, Text: "再想"},
+		{Kind: agent.OutputContent, Text: "正"},
+		{Kind: agent.OutputContent, Text: "文"},
+	}
+	for _, ev := range events {
+		if err := terminal.WriteOutput(t.Context(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	want := ansiReasoning + "先想" + ansiReset + ansiReasoning + "再想" + ansiReset + "\n正文"
+	if out.String() != want {
+		t.Fatalf("输出 = %q，预期 %q", out.String(), want)
 	}
 }

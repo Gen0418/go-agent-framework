@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"go-agent-framework/internal/apis"
-	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/storage"
 )
 
@@ -31,7 +30,7 @@ type exchange struct {
 	stream   string
 }
 
-func newTestLoop(t *testing.T, exchanges ...exchange) *AgentLoop {
+func newTestLoop(t *testing.T, exchanges ...exchange) (*AgentLoop, *apis.Client) {
 	t.Helper()
 	pending := make(chan exchange, len(exchanges))
 	for _, step := range exchanges {
@@ -72,11 +71,11 @@ func newTestLoop(t *testing.T, exchanges ...exchange) *AgentLoop {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, store, apis.StreamOptions{})
+	loop := NewAgentLoop(store, nil)
 	if err := loop.NewSession(t.Context(), "测试会话"); err != nil {
 		t.Fatal(err)
 	}
-	return loop
+	return loop, &apis.Client{Endpoint: server.URL}
 }
 
 func assertHistory(t *testing.T, loop *AgentLoop, want []apis.Message) {
@@ -84,7 +83,7 @@ func assertHistory(t *testing.T, loop *AgentLoop, want []apis.Message) {
 	if !reflect.DeepEqual(loop.msgs, want) {
 		t.Errorf("内存历史 = %+v，预期 %+v", loop.msgs, want)
 	}
-	stored, err := loop.store.LoadHistory(t.Context(), loop.SessionId)
+	stored, err := loop.store.LoadHistory(t.Context(), loop.SessionId())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,17 +92,6 @@ func assertHistory(t *testing.T, loop *AgentLoop, want []apis.Message) {
 	}
 	if !reflect.DeepEqual(stored, want) {
 		t.Errorf("数据库历史 = %+v，预期 %+v", stored, want)
-	}
-}
-
-func inputOnce(t *testing.T, text string) InputFunc {
-	used := false
-	return func(context.Context) (string, error) {
-		if used {
-			t.Fatal("一轮中重复读取用户输入")
-		}
-		used = true
-		return text, nil
 	}
 }
 
@@ -139,22 +127,36 @@ func TestRunTurnToolResultsAndNextTurn(t *testing.T) {
 		{Role: "user", Content: "继续"},
 		{Role: "assistant", ReasoningContent: "思考", Content: "答复"},
 	}
-	loop := newTestLoop(t,
+	loop, client := newTestLoop(t,
 		exchange{history[:1], callStream + "\n\n" + callFinishEvent + doneEvent},
 		exchange{history[:4], replyStream},
 		exchange{history[:6], replyStream},
 	)
+	var gotCalls []apis.ToolCall
 	var results []string
-	output := func(_ context.Context, text string, role OutputRole) error {
-		if role == IsToolContent {
-			results = append(results, text)
+	output := func(_ context.Context, event OutputEvent) error {
+		switch event.Kind {
+		case OutputToolCall:
+			if event.ToolCall != nil {
+				gotCalls = append(gotCalls, *event.ToolCall)
+			}
+		case OutputToolResult:
+			results = append(results, event.Text)
 		}
 		return nil
 	}
-	if err := loop.RunTurn(t.Context(), inputOnce(t, user.Content), output, confirm); err != nil {
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   user.Content,
+		Client:  client,
+		Output:  output,
+		Confirm: confirm,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	assertHistory(t, loop, history[:5])
+	if !reflect.DeepEqual(gotCalls, []apis.ToolCall{call, secondCall}) {
+		t.Fatalf("实时工具调用 = %+v，预期 %+v", gotCalls, []apis.ToolCall{call, secondCall})
+	}
 	if !reflect.DeepEqual(results, []string{result, "用户拒绝执行"}) {
 		t.Fatalf("实时工具输出 = %q", results)
 	}
@@ -165,7 +167,12 @@ func TestRunTurnToolResultsAndNextTurn(t *testing.T) {
 		t.Fatalf("拒绝后检查文件，收到 %v", err)
 	}
 
-	if err := loop.RunTurn(t.Context(), inputOnce(t, "继续"), discardOutput, unexpectedConfirm(t)); err != nil {
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   "继续",
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	assertHistory(t, loop, history)
@@ -186,23 +193,19 @@ func TestRunTurnReplyBoundaries(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			want := []apis.Message{user}
-			loop := newTestLoop(t, exchange{want, tc.stream})
-			err := loop.RunTurn(t.Context(), inputOnce(t, user.Content), discardOutput, unexpectedConfirm(t))
+			loop, client := newTestLoop(t, exchange{want, tc.stream})
+			err := loop.RunTurn(t.Context(), TurnRequest{
+				Input:   user.Content,
+				Client:  client,
+				Output:  discardOutput,
+				Confirm: unexpectedConfirm(t),
+			})
 			if (err != nil) != tc.wantError || errors.Is(err, io.ErrUnexpectedEOF) != tc.wantEOF {
 				t.Fatalf("返回错误 = %v", err)
 			}
 			assertHistory(t, loop, want)
 		})
 	}
-}
-
-func TestRunTurnInputEOF(t *testing.T) {
-	loop := newTestLoop(t)
-	err := loop.RunTurn(t.Context(), func(context.Context) (string, error) { return "", io.EOF }, discardOutput, unexpectedConfirm(t))
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("预期输入结束，收到 %v", err)
-	}
-	assertHistory(t, loop, []apis.Message{})
 }
 
 type rejectToolStore struct {
@@ -219,11 +222,16 @@ func (s rejectToolStore) AppendMessage(ctx context.Context, sessionId int64, msg
 
 func TestRunTurnToolWriteFailure(t *testing.T) {
 	user := apis.Message{Role: "user", Content: "调用工具"}
-	loop := newTestLoop(t, exchange{[]apis.Message{user}, callStream + "\n\n" + callFinishEvent + doneEvent})
+	loop, client := newTestLoop(t, exchange{[]apis.Message{user}, callStream + "\n\n" + callFinishEvent + doneEvent})
 	wantErr := errors.New("工具结果写入失败")
 	loop.store = rejectToolStore{Store: loop.store, err: wantErr}
 
-	err := loop.RunTurn(t.Context(), inputOnce(t, user.Content), discardOutput, func(context.Context, string, string) (bool, error) { return false, nil })
+	err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   user.Content,
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: func(context.Context, string, string) (bool, error) { return false, nil },
+	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("预期工具结果写入错误，收到 %v", err)
 	}
@@ -233,28 +241,32 @@ func TestRunTurnToolWriteFailure(t *testing.T) {
 	assertHistory(t, loop, []apis.Message{user, loop.msgs[1]})
 }
 
-func discardOutput(context.Context, string, OutputRole) error {
+func discardOutput(context.Context, OutputEvent) error {
 	return nil
 }
 
 func TestRunTurnOutput(t *testing.T) {
 	user := apis.Message{Role: "user", Content: "测试输出"}
-	loop := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
-	type fragment struct {
-		text string
-		role OutputRole
-	}
-	var got []fragment
-	err := loop.RunTurn(t.Context(), inputOnce(t, user.Content), func(_ context.Context, text string, role OutputRole) error {
-		got = append(got, fragment{text, role})
-		return nil
-	}, unexpectedConfirm(t))
+	loop, client := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
+	var got []OutputEvent
+	err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:  user.Content,
+		Client: client,
+		Output: func(_ context.Context, event OutputEvent) error {
+			got = append(got, event)
+			return nil
+		},
+		Confirm: unexpectedConfirm(t),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []fragment{{"思考", IsReasoningContent}, {"\n答复", IsContent}}
+	want := []OutputEvent{
+		{Kind: OutputReasoning, Text: "思考"},
+		{Kind: OutputContent, Text: "答复"},
+	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("输出片段 = %+v，预期 %+v", got, want)
+		t.Fatalf("输出事件 = %+v，预期 %+v", got, want)
 	}
 }
 
@@ -262,19 +274,24 @@ func TestRunTurnOutputFailure(t *testing.T) {
 	for _, failAt := range []string{"思考", "答复"} {
 		t.Run(failAt, func(t *testing.T) {
 			user := apis.Message{Role: "user", Content: "测试输出失败"}
-			loop := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
+			loop, client := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
 			wantErr := errors.New("输出中断")
 			failed := false
-			err := loop.RunTurn(t.Context(), inputOnce(t, user.Content), func(_ context.Context, text string, _ OutputRole) error {
-				if failed {
-					t.Error("输出失败后仍收到片段")
-				}
-				if strings.TrimPrefix(text, "\n") == failAt {
-					failed = true
-					return wantErr
-				}
-				return nil
-			}, unexpectedConfirm(t))
+			err := loop.RunTurn(t.Context(), TurnRequest{
+				Input:  user.Content,
+				Client: client,
+				Output: func(_ context.Context, event OutputEvent) error {
+					if failed {
+						t.Error("输出失败后仍收到片段")
+					}
+					if event.Text == failAt {
+						failed = true
+						return wantErr
+					}
+					return nil
+				},
+				Confirm: unexpectedConfirm(t),
+			})
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("预期输出中断，收到 %v", err)
 			}
@@ -286,18 +303,28 @@ func TestRunTurnOutputFailure(t *testing.T) {
 func TestNewSessionStartsSeparateHistory(t *testing.T) {
 	first := apis.Message{Role: "user", Content: "第一段对话"}
 	second := apis.Message{Role: "user", Content: "第二段对话"}
-	loop := newTestLoop(t, exchange{[]apis.Message{first}, replyStream}, exchange{[]apis.Message{second}, replyStream})
-	if err := loop.RunTurn(t.Context(), inputOnce(t, first.Content), discardOutput, unexpectedConfirm(t)); err != nil {
+	loop, client := newTestLoop(t, exchange{[]apis.Message{first}, replyStream}, exchange{[]apis.Message{second}, replyStream})
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   first.Content,
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
-	firstID := loop.SessionId
+	firstID := loop.SessionId()
 	if err := loop.NewSession(t.Context(), "新会话"); err != nil {
 		t.Fatal(err)
 	}
-	if loop.SessionId == firstID {
+	if loop.SessionId() == firstID {
 		t.Fatal("新会话复用了旧会话 ID")
 	}
-	if err := loop.RunTurn(t.Context(), inputOnce(t, second.Content), discardOutput, unexpectedConfirm(t)); err != nil {
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   second.Content,
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	assertHistory(t, loop, []apis.Message{second, {Role: "assistant", Content: "答复", ReasoningContent: "思考"}})
@@ -362,7 +389,7 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			}
 			historyAfterCancel := append([]apis.Message{user, assistantCalls}, canceledTools...)
 
-			loop := newTestLoop(
+			loop, client := newTestLoop(
 				t,
 				exchange{[]apis.Message{user}, callStream + "\n\n" + callFinishEvent + doneEvent},
 				exchange{append(historyAfterCancel, nextUser), replyStream},
@@ -371,17 +398,22 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			defer cancel()
 
 			var toolOutputs []string
-			err := loop.RunTurn(ctx, inputOnce(t, user.Content), func(_ context.Context, chunk string, role OutputRole) error {
-				if role == IsToolContent {
-					toolOutputs = append(toolOutputs, chunk)
-				}
-				return nil
-			}, func(context.Context, string, string) (bool, error) {
-				if want == context.Canceled {
-					cancel()
-					return true, nil
-				}
-				return false, io.EOF
+			err := loop.RunTurn(ctx, TurnRequest{
+				Input:  user.Content,
+				Client: client,
+				Output: func(_ context.Context, event OutputEvent) error {
+					if event.Kind == OutputToolResult {
+						toolOutputs = append(toolOutputs, event.Text)
+					}
+					return nil
+				},
+				Confirm: func(context.Context, string, string) (bool, error) {
+					if want == context.Canceled {
+						cancel()
+						return true, nil
+					}
+					return false, io.EOF
+				},
 			})
 			if !errors.Is(err, want) {
 				t.Fatalf("返回错误 = %v，预期 %v", err, want)
@@ -392,11 +424,16 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			}
 
 			// 重新绑定会话并继续下一轮，确认持久化历史合法可续聊
-			reloaded := NewAgentLoop(loop.cfg, loop.store, loop.opts)
-			if err := reloaded.BindSession(t.Context(), loop.SessionId); err != nil {
+			reloaded := NewAgentLoop(loop.store, nil)
+			if err := reloaded.BindSession(t.Context(), loop.SessionId()); err != nil {
 				t.Fatal(err)
 			}
-			if err := reloaded.RunTurn(t.Context(), inputOnce(t, nextUser.Content), discardOutput, unexpectedConfirm(t)); err != nil {
+			if err := reloaded.RunTurn(t.Context(), TurnRequest{
+				Input:   nextUser.Content,
+				Client:  client,
+				Output:  discardOutput,
+				Confirm: unexpectedConfirm(t),
+			}); err != nil {
 				t.Fatalf("中断后重绑续聊失败: %v", err)
 			}
 		})
@@ -410,17 +447,22 @@ func TestRunTurnStreamCanceled(t *testing.T) {
 			"data: " + `{"choices":[{"delta":{"content":"前半句"}}]}` + "\n\n" +
 			"data: " + `{"choices":[{"delta":{"content":"后半句"}}]}` + "\n\n" + stopEvent + doneEvent
 
-		loop := newTestLoop(t, exchange{[]apis.Message{user}, partialStream})
+		loop, client := newTestLoop(t, exchange{[]apis.Message{user}, partialStream})
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 
-		err := loop.RunTurn(ctx, inputOnce(t, user.Content), func(_ context.Context, text string, role OutputRole) error {
-			if role == IsContent && strings.TrimPrefix(text, "\n") == "前半句" {
-				cancel()
-				return nil
-			}
-			return ctx.Err()
-		}, unexpectedConfirm(t))
+		err := loop.RunTurn(ctx, TurnRequest{
+			Input:  user.Content,
+			Client: client,
+			Output: func(_ context.Context, event OutputEvent) error {
+				if event.Kind == OutputContent && event.Text == "前半句" {
+					cancel()
+					return nil
+				}
+				return ctx.Err()
+			},
+			Confirm: unexpectedConfirm(t),
+		})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("返回错误 = %v，预期 context.Canceled", err)
 		}
@@ -432,14 +474,19 @@ func TestRunTurnStreamCanceled(t *testing.T) {
 
 	t.Run("尚未收到输出即取消不写入空助手消息", func(t *testing.T) {
 		user := apis.Message{Role: "user", Content: "立刻停止"}
-		loop := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
+		loop, client := newTestLoop(t, exchange{[]apis.Message{user}, replyStream})
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 
-		err := loop.RunTurn(ctx, inputOnce(t, user.Content), func(_ context.Context, _ string, _ OutputRole) error {
-			cancel()
-			return ctx.Err()
-		}, unexpectedConfirm(t))
+		err := loop.RunTurn(ctx, TurnRequest{
+			Input:  user.Content,
+			Client: client,
+			Output: func(_ context.Context, _ OutputEvent) error {
+				cancel()
+				return ctx.Err()
+			},
+			Confirm: unexpectedConfirm(t),
+		})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("返回错误 = %v，预期 context.Canceled", err)
 		}
@@ -458,8 +505,8 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	}
 	next := apis.Message{Role: "user", Content: "刚才的目录是什么？"}
 	request := append(history, next)
-	loop := newTestLoop(t, exchange{request, replyStream})
-	targetID := loop.SessionId
+	loop, client := newTestLoop(t, exchange{request, replyStream})
+	targetID := loop.SessionId()
 	for _, msg := range history {
 		if err := loop.appendMessage(ctx, msg); err != nil {
 			t.Fatal(err)
@@ -469,7 +516,7 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	if err := loop.NewSession(ctx, "另一个会话"); err != nil {
 		t.Fatal(err)
 	}
-	otherID := loop.SessionId
+	otherID := loop.SessionId()
 	if err := loop.appendMessage(ctx, apis.Message{Role: "user", Content: "独立的话题"}); err != nil {
 		t.Fatal(err)
 	}
@@ -481,10 +528,15 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	if err := loop.BindSession(ctx, targetID); err != nil {
 		t.Fatal(err)
 	}
-	if loop.SessionId != targetID {
-		t.Fatalf("绑定的会话 = %d，预期 %d", loop.SessionId, targetID)
+	if loop.SessionId() != targetID {
+		t.Fatalf("绑定的会话 = %d，预期 %d", loop.SessionId(), targetID)
 	}
-	if err := loop.RunTurn(ctx, inputOnce(t, next.Content), discardOutput, unexpectedConfirm(t)); err != nil {
+	if err := loop.RunTurn(ctx, TurnRequest{
+		Input:   next.Content,
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -519,8 +571,8 @@ func (s failingLoadStore) LoadHistory(ctx context.Context, sessionId int64) ([]a
 
 func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 	ctx := t.Context()
-	loop := newTestLoop(t)
-	currentID := loop.SessionId
+	loop, _ := newTestLoop(t)
+	currentID := loop.SessionId()
 	msg := apis.Message{Role: "user", Content: "保留这段历史"}
 	if err := loop.appendMessage(ctx, msg); err != nil {
 		t.Fatal(err)
@@ -547,8 +599,8 @@ func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 			if err := loop.BindSession(ctx, tc.id); err == nil {
 				t.Fatal("预期绑定失败")
 			}
-			if loop.SessionId != currentID {
-				t.Fatalf("绑定失败后会话 ID 变成了 %d", loop.SessionId)
+			if loop.SessionId() != currentID {
+				t.Fatalf("绑定失败后会话 ID 变成了 %d", loop.SessionId())
 			}
 			assertHistory(t, loop, []apis.Message{msg})
 		})
@@ -557,7 +609,7 @@ func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 
 func TestBindEmptySession(t *testing.T) {
 	ctx := t.Context()
-	loop := newTestLoop(t)
+	loop, _ := newTestLoop(t)
 	if err := loop.appendMessage(ctx, apis.Message{Role: "user", Content: "旧消息"}); err != nil {
 		t.Fatal(err)
 	}
@@ -569,13 +621,15 @@ func TestBindEmptySession(t *testing.T) {
 	if err := loop.BindSession(ctx, emptyID); err != nil {
 		t.Fatal(err)
 	}
-	if loop.SessionId != emptyID || len(loop.msgs) != 0 {
-		t.Fatalf("绑定空会话后 ID = %d，历史 = %+v", loop.SessionId, loop.msgs)
+	if loop.SessionId() != emptyID || len(loop.msgs) != 0 {
+		t.Fatalf("绑定空会话后 ID = %d，历史 = %+v", loop.SessionId(), loop.msgs)
 	}
 }
 
-func TestSetOptsAppliesToNextTurn(t *testing.T) {
+func TestRunTurnPerTurnOptsAndClient(t *testing.T) {
 	type capturedReq struct {
+		auth     string
+		Model    string `json:"model"`
 		Thinking *struct {
 			Type string `json:"type"`
 		} `json:"thinking"`
@@ -583,101 +637,16 @@ func TestSetOptsAppliesToNextTurn(t *testing.T) {
 		Tools           []apis.Tool `json:"tools"`
 	}
 
-	var gotReqs []capturedReq
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req capturedReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Error(err)
-			http.Error(w, "请求格式错误", http.StatusBadRequest)
-			return
-		}
-		gotReqs = append(gotReqs, req)
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, replyStream)
-	}))
-	t.Cleanup(server.Close)
-
-	store, err := storage.Open(t.Context(), ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	tools := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
-	loop := NewAgentLoop(config.Config{Endpoint: server.URL}, store, apis.StreamOptions{
-		Thinking:        true,
-		ReasoningEffort: "high",
-		Tools:           tools,
-	})
-	if err := loop.NewSession(t.Context(), "选项切换测试"); err != nil {
-		t.Fatal(err)
-	}
-
-	// 外部修改原切片不应影响 AgentLoop 已保存的选项
-	tools[0].Function.Name = "mutated"
-	if err := loop.RunTurn(t.Context(), inputOnce(t, "第一轮"), discardOutput, unexpectedConfirm(t)); err != nil {
-		t.Fatal(err)
-	}
-
-	// 关闭思考与工具后，第二轮应生效
-	loop.SetOpts(apis.StreamOptions{
-		Thinking:        false,
-		ReasoningEffort: "max",
-		Tools:           nil,
-	})
-	if err := loop.RunTurn(t.Context(), inputOnce(t, "第二轮"), discardOutput, unexpectedConfirm(t)); err != nil {
-		t.Fatal(err)
-	}
-
-	// 重新开启思考与工具，并再次验证外部切片隔离
-	nextTools := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
-	loop.SetOpts(apis.StreamOptions{
-		Thinking:        true,
-		ReasoningEffort: "low",
-		Tools:           nextTools,
-	})
-	nextTools[0].Function.Name = "mutated-again"
-	if err := loop.RunTurn(t.Context(), inputOnce(t, "第三轮"), discardOutput, unexpectedConfirm(t)); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(gotReqs) != 3 {
-		t.Fatalf("收到 %d 次请求，预期 3 次", len(gotReqs))
-	}
-	if gotReqs[0].Thinking == nil || gotReqs[0].Thinking.Type != "enabled" ||
-		gotReqs[0].ReasoningEffort != "high" || len(gotReqs[0].Tools) != 1 || gotReqs[0].Tools[0].Function.Name != "bash" {
-		t.Fatalf("第一轮请求选项不符: %+v", gotReqs[0])
-	}
-	if gotReqs[1].Thinking == nil || gotReqs[1].Thinking.Type != "disabled" ||
-		gotReqs[1].ReasoningEffort != "" || len(gotReqs[1].Tools) != 0 {
-		t.Fatalf("第二轮请求选项不符: %+v", gotReqs[1])
-	}
-	if gotReqs[2].Thinking == nil || gotReqs[2].Thinking.Type != "enabled" ||
-		gotReqs[2].ReasoningEffort != "low" || len(gotReqs[2].Tools) != 1 || gotReqs[2].Tools[0].Function.Name != "bash" {
-		t.Fatalf("第三轮请求选项不符: %+v", gotReqs[2])
-	}
-}
-
-func TestSetConfigAppliesToNextTurn(t *testing.T) {
-	type captured struct {
-		auth  string
-		model string
-	}
-
-	makeServer := func(out *[]captured) *httptest.Server {
+	makeServer := func(out *[]capturedReq) *httptest.Server {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var body struct {
-				Model string `json:"model"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			var req capturedReq
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Error(err)
 				http.Error(w, "请求格式错误", http.StatusBadRequest)
 				return
 			}
-			*out = append(*out, captured{
-				auth:  r.Header.Get("Authorization"),
-				model: body.Model,
-			})
+			req.auth = r.Header.Get("Authorization")
+			*out = append(*out, req)
 			w.Header().Set("Content-Type", "text/event-stream")
 			io.WriteString(w, replyStream)
 		}))
@@ -685,9 +654,9 @@ func TestSetConfigAppliesToNextTurn(t *testing.T) {
 		return server
 	}
 
-	var firstGot, secondGot []captured
-	server1 := makeServer(&firstGot)
-	server2 := makeServer(&secondGot)
+	var firstReqs, secondReqs []capturedReq
+	server1 := makeServer(&firstReqs)
+	server2 := makeServer(&secondReqs)
 
 	store, err := storage.Open(t.Context(), ":memory:")
 	if err != nil {
@@ -695,33 +664,47 @@ func TestSetConfigAppliesToNextTurn(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	loop := NewAgentLoop(config.Config{
-		APIKey:       "key-1",
-		Endpoint:     server1.URL,
-		DefaultModel: "model-1",
-	}, store, apis.StreamOptions{})
-	if err := loop.NewSession(t.Context(), "配置切换测试"); err != nil {
+	loop := NewAgentLoop(store, nil)
+	if err := loop.NewSession(t.Context(), "单轮参数测试"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := loop.RunTurn(t.Context(), inputOnce(t, "第一轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+	// 第一轮：server1 + key-1 + 开启思考与工具
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:  "第一轮",
+		Client: &apis.Client{Endpoint: server1.URL, APIKey: "key-1", Model: "model-1"},
+		Opts: apis.StreamOptions{
+			Thinking:        true,
+			ReasoningEffort: "high",
+			Tools:           []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}},
+		},
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	// 切换配置后，第二轮应请求新的 Endpoint、APIKey 和 DefaultModel
-	loop.SetConfig(config.Config{
-		APIKey:       "key-2",
-		Endpoint:     server2.URL,
-		DefaultModel: "model-2",
-	})
-	if err := loop.RunTurn(t.Context(), inputOnce(t, "第二轮"), discardOutput, unexpectedConfirm(t)); err != nil {
+	// 第二轮：切到 server2 + key-2 + 关闭思考与工具
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:  "第二轮",
+		Client: &apis.Client{Endpoint: server2.URL, APIKey: "key-2", Model: "model-2"},
+		Opts: apis.StreamOptions{
+			Thinking:        false,
+			ReasoningEffort: "max",
+			Tools:           nil,
+		},
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(firstGot) != 1 || firstGot[0].auth != "Bearer key-1" || firstGot[0].model != "model-1" {
-		t.Fatalf("第一轮配置未生效: %+v", firstGot)
+	if len(firstReqs) != 1 || firstReqs[0].auth != "Bearer key-1" || firstReqs[0].Model != "model-1" ||
+		firstReqs[0].Thinking == nil || firstReqs[0].Thinking.Type != "enabled" ||
+		firstReqs[0].ReasoningEffort != "high" || len(firstReqs[0].Tools) != 1 {
+		t.Fatalf("第一轮请求不符: %+v", firstReqs)
 	}
-	if len(secondGot) != 1 || secondGot[0].auth != "Bearer key-2" || secondGot[0].model != "model-2" {
-		t.Fatalf("第二轮新配置未生效: %+v", secondGot)
+	if len(secondReqs) != 1 || secondReqs[0].auth != "Bearer key-2" || secondReqs[0].Model != "model-2" ||
+		secondReqs[0].Thinking == nil || secondReqs[0].Thinking.Type != "disabled" ||
+		secondReqs[0].ReasoningEffort != "" || len(secondReqs[0].Tools) != 0 {
+		t.Fatalf("第二轮请求不符: %+v", secondReqs)
 	}
 }

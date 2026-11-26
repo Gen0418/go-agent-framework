@@ -106,22 +106,29 @@ func TestSessionListRenameAndRemove(t *testing.T) {
 	}
 }
 
-func TestSessionStateAppendStreamChunk(t *testing.T) {
+func TestSessionStateAppendStreamEvent(t *testing.T) {
 	s := &sessionState{}
+	call := apis.ToolCall{
+		Id:       "call-1",
+		Type:     "function",
+		Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"pwd"}`},
+	}
 
-	s.appendStreamChunk(agent.IsReasoningContent, "思考1")
-	s.appendStreamChunk(agent.IsReasoningContent, "思考2")
-	s.appendStreamChunk(agent.IsContent, "正文1")
-	s.appendStreamChunk(agent.IsToolContent, "工具结果")
-	s.appendStreamChunk(agent.IsContent, "总结回复")
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputReasoning, Text: "思考1"})
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputReasoning, Text: "思考2"})
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputContent, Text: "正文1"})
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputToolCall, ToolCall: &call})
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputToolResult, Text: "工具结果", ToolCallId: "call-1"})
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputContent, Text: "总结回复"})
 
 	if len(s.messages) != 3 {
 		t.Fatalf("消息数量 = %d，预期 3", len(s.messages))
 	}
-	if s.messages[0].Role != "assistant" || s.messages[0].ReasoningContent != "思考1思考2" || s.messages[0].Content != "正文1" {
+	if s.messages[0].Role != "assistant" || s.messages[0].ReasoningContent != "思考1思考2" ||
+		s.messages[0].Content != "正文1" || len(s.messages[0].ToolCalls) != 1 || s.messages[0].ToolCalls[0] != call {
 		t.Fatalf("第 1 条消息 = %+v", s.messages[0].Message)
 	}
-	if s.messages[1].Role != "tool" || s.messages[1].Content != "工具结果" {
+	if s.messages[1].Role != "tool" || s.messages[1].Content != "工具结果" || s.messages[1].ToolCallId != "call-1" {
 		t.Fatalf("第 2 条消息 = %+v", s.messages[1].Message)
 	}
 	if s.messages[2].Role != "assistant" || s.messages[2].Content != "总结回复" {

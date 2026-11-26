@@ -11,9 +11,16 @@ import (
 	"go-agent-framework/internal/apis"
 )
 
+const (
+	ansiReasoning = "\x1b[3;90m" // 斜体、灰色
+	ansiTool      = "\x1b[36m"   // 青色
+	ansiReset     = "\x1b[0m"    // 恢复默认
+)
+
 type Cli struct {
-	Scanner *bufio.Scanner
-	out     io.Writer
+	Scanner     *bufio.Scanner
+	out         io.Writer
+	inReasoning bool
 }
 
 func NewCli(in io.Reader, out io.Writer) *Cli {
@@ -38,33 +45,44 @@ func (c *Cli) ReadInput(ctx context.Context) (string, error) {
 	return "", io.EOF
 }
 
-func (c *Cli) WriteOutput(ctx context.Context, text string, outputRole agent.OutputRole) error {
-	switch outputRole {
-	case agent.IsContent:
-		_, err := fmt.Fprint(c.out, text)
+func (c *Cli) WriteOutput(ctx context.Context, event agent.OutputEvent) error {
+	switch event.Kind {
+	case agent.OutputReasoning:
+		c.inReasoning = true
+		_, err := fmt.Fprint(c.out, ansiReasoning, event.Text, ansiReset)
 		return err
 
-	case agent.IsReasoningContent:
-		const style = "\x1b[3;90m" // 斜体、灰色
-		const reset = "\x1b[0m"    // 恢复默认
-
-		_, err := fmt.Fprint(c.out, style, text, reset)
+	case agent.OutputContent:
+		prefix := ""
+		if c.inReasoning {
+			prefix = "\n"
+			c.inReasoning = false
+		}
+		_, err := fmt.Fprint(c.out, prefix, event.Text)
 		return err
-	case agent.IsToolContent:
-		const style = "\x1b[36m" // 青色
-		const reset = "\x1b[0m"  // 恢复默认
 
+	case agent.OutputToolCall:
+		c.inReasoning = false
+		if event.ToolCall == nil {
+			return nil
+		}
+		_, err := fmt.Fprintf(c.out, "\n[工具调用] %s %s\n", event.ToolCall.Function.Name, event.ToolCall.Function.Args)
+		return err
+
+	case agent.OutputToolResult:
+		c.inReasoning = false
+		text := event.Text
 		if !strings.HasSuffix(text, "\n") {
 			text += "\n"
 		}
-		if _, err := fmt.Fprint(c.out, style, "[工具输出] ", reset); err != nil {
+		if _, err := fmt.Fprint(c.out, ansiTool, "[工具输出] ", ansiReset); err != nil {
 			return err
 		}
 		_, err := fmt.Fprint(c.out, text)
 		return err
 
 	default:
-		_, err := fmt.Fprint(c.out, text)
+		_, err := fmt.Fprint(c.out, event.Text)
 		return err
 	}
 }
@@ -97,20 +115,34 @@ func (c *Cli) ConfirmOperateByUser(ctx context.Context, dir, command string) (bo
 
 func (c *Cli) PrintHistory(ctx context.Context, msgs []apis.Message) {
 	for _, msg := range msgs {
-		splitMark := "\n"
 		if msg.Role == "tool" {
-			c.WriteOutput(ctx, msg.Content, agent.IsToolContent)
+			_ = c.WriteOutput(ctx, agent.OutputEvent{
+				Kind:       agent.OutputToolResult,
+				Text:       msg.Content,
+				ToolCallId: msg.ToolCallId,
+			})
 			continue
 		}
 		if strings.TrimSpace(msg.ReasoningContent) != "" {
-			c.WriteOutput(ctx, splitMark+msg.ReasoningContent, agent.IsReasoningContent)
+			_ = c.WriteOutput(ctx, agent.OutputEvent{
+				Kind: agent.OutputReasoning,
+				Text: "\n" + msg.ReasoningContent,
+			})
 		}
 		if strings.TrimSpace(msg.Content) != "" {
-			c.WriteOutput(ctx, splitMark+msg.Content, agent.IsContent)
+			c.inReasoning = false
+			_ = c.WriteOutput(ctx, agent.OutputEvent{
+				Kind: agent.OutputContent,
+				Text: "\n" + msg.Content,
+			})
 		}
-		for _, call := range msg.ToolCalls {
-			c.WriteOutput(ctx, splitMark+"[工具调用] "+call.Function.Name+" "+call.Function.Args+"\n", agent.IsContent)
+		for i := range msg.ToolCalls {
+			call := msg.ToolCalls[i]
+			_ = c.WriteOutput(ctx, agent.OutputEvent{
+				Kind:     agent.OutputToolCall,
+				ToolCall: &call,
+			})
 		}
-
 	}
+	c.inReasoning = false
 }
