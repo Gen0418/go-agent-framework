@@ -21,7 +21,7 @@ func TestExecBashWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, err := ExecBash(t.Context(), dir, "cat input.txt")
+	output, err := execBash(t.Context(), dir, "cat input.txt")
 	if err != nil || output != "目标文件" {
 		t.Fatalf("输出 = %q，错误 = %v", output, err)
 	}
@@ -65,7 +65,7 @@ func TestRegistryRunInvalidArguments(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			call := apis.ToolCall{Id: "a", Function: apis.ToolCallFunction{Name: tc.tool, Args: tc.args}}
+			call := apis.ToolCall{ID: "a", Function: apis.ToolCallFunction{Name: tc.tool, Args: tc.args}}
 			got, err := reg.Run(t.Context(), t.TempDir(), call, unexpectedConfirm)
 			if err != nil || !strings.Contains(got, tc.want) {
 				t.Fatalf("结果 = %q，错误 = %v，预期包含 %q", got, err, tc.want)
@@ -77,7 +77,7 @@ func TestRegistryRunInvalidArguments(t *testing.T) {
 func TestBashRunConfirmAndExecution(t *testing.T) {
 	reg := DefaultRegistry()
 	call := apis.ToolCall{
-		Id:       "a",
+		ID:       "a",
 		Type:     "function",
 		Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"echo diagnostic >&2; exit 7"}`},
 	}

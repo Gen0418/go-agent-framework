@@ -10,9 +10,9 @@ import (
 
 type sidebarProps struct {
 	sessions   []storage.Session
-	selectedId int64
+	selectedID int64
 	onNew      func()
-	onSelect   func(sessionId int64)
+	onSelect   func(sessionID int64)
 	onRename   func(session storage.Session)
 	onDelete   func(session storage.Session)
 	onSettings func()
@@ -37,9 +37,9 @@ func renderSidebar(c *ui.Context, props sidebarProps) {
 }
 
 func renderSidebarItem(c *ui.Context, session storage.Session, props sidebarProps) {
-	ui.Row(c.Key(session.Id)).FillWidth().Children(func() {
+	ui.Row(c.Key(session.ID)).FillWidth().Children(func() {
 		if ui.Button(c, session.Title).Grow(1).Clicked() && props.onSelect != nil {
-			props.onSelect(session.Id)
+			props.onSelect(session.ID)
 		}
 		ui.PopoverMenuButton(c, "...", func(m *ui.Menu) {
 			if m.Item("重命名").Chosen() && props.onRename != nil {
@@ -48,6 +48,6 @@ func renderSidebarItem(c *ui.Context, session storage.Session, props sidebarProp
 			if m.Item("删除").Chosen() && props.onDelete != nil {
 				props.onDelete(session)
 			}
-		}).Label(fmt.Sprintf("更多操作 %d", session.Id))
+		}).Label(fmt.Sprintf("更多操作 %d", session.ID))
 	})
 }

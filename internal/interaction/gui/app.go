@@ -31,7 +31,7 @@ type app struct {
 
 	// 会话级信息
 	sessions       sessionList
-	sessionStates  map[int64]*sessionState // sessionId -> sessionState
+	sessionStates  map[int64]*sessionState // sessionID -> sessionState
 	optsPopover    optsPopover             // 会话选项浮层组件
 	renameDialog   renameDialog            // 重命名弹框状态
 	deleteDialog   deleteDialog            // 删除确认弹框状态
@@ -53,14 +53,14 @@ func (a *app) sessionState(id int64) *sessionState {
 }
 
 func (a *app) selectedSessionState() (storage.Session, *sessionState, bool) {
-	if a.sessions.selectedId == 0 {
-		return storage.Session{Id: 0, Title: "新对话"}, a.sessionState(0), true
+	if a.sessions.selectedID == 0 {
+		return storage.Session{ID: 0, Title: "新对话"}, a.sessionState(0), true
 	}
 	s, ok := a.sessions.selected()
 	if !ok {
 		return storage.Session{}, nil, false
 	}
-	return s, a.sessionState(s.Id), true
+	return s, a.sessionState(s.ID), true
 }
 
 // 应用根视图
@@ -69,9 +69,9 @@ func (a *app) view(c *ui.Context) {
 	ui.Row(c).Fill().Children(func() {
 		renderSidebar(c, sidebarProps{
 			sessions:   a.sessions.list,
-			selectedId: a.sessions.selectedId,
+			selectedID: a.sessions.selectedID,
 			onNew: func() {
-				a.sessions.selectedId = 0
+				a.sessions.selectedID = 0
 				a.err = nil
 			},
 			onSelect: func(id int64) {
@@ -100,25 +100,25 @@ func (a *app) renderActiveChat(c *ui.Context) {
 	}
 
 	renderChat(c, chatProps{
-		sessionId: curSession.Id,
+		sessionID: curSession.ID,
 		title:     curSession.Title,
 		err:       curSessionState.err,
 		messages:  curSessionState.messages,
 		confirm:   curSessionState.confirm,
 		onConfirm: curSessionState.resolveConfirm,
 		composer: composerProps{
-			sessionId:   curSession.Id,
+			sessionID:   curSession.ID,
 			inputText:   &curSessionState.inputText,
 			model:       a.cfg.DefaultModel,
 			opts:        &curSessionState.opts,
 			hasTools:    len(a.defaultOpts.Tools) > 0,
 			optsPopover: &a.optsPopover,
-			running:     curSessionState.sessionRunning,
+			running:     curSessionState.running,
 			onToggleTools: func(enabled bool) {
 				curSessionState.setToolsEnabled(enabled, a.defaultOpts.Tools)
 			},
 			onSubmit: func(text string) {
-				a.submit(curSession.Id, text)
+				a.submit(curSession.ID, text)
 			},
 			onStop: func() {
 				if curSessionState.cancel != nil {
@@ -131,7 +131,7 @@ func (a *app) renderActiveChat(c *ui.Context) {
 }
 
 // 首次发送时将新对话草稿落库为正式会话
-// 同步迁移 sessionStates[0] 到真实 sessionId
+// 同步迁移 sessionStates[0] 到真实 sessionID
 func (a *app) lazyCreateSession(input string) (int64, error) {
 	title := makeSessionTitle(input)
 	id, err := a.store.CreateSession(a.ctx, title)
@@ -145,23 +145,23 @@ func (a *app) lazyCreateSession(input string) (int64, error) {
 	curSession.err = nil
 	a.sessionStates[id] = curSession
 
-	a.sessions.add(storage.Session{Id: id, Title: title})
-	a.sessions.selectedId = id
+	a.sessions.add(storage.Session{ID: id, Title: title})
+	a.sessions.selectedID = id
 	return id, nil
 }
 
 // 加载指定 session
 // 仅在首次切换且尚未加载历史时读库
-func (a *app) selectSession(selectedId int64) error {
-	if selectedId == 0 {
-		a.sessions.selectedId = 0
+func (a *app) selectSession(selectedID int64) error {
+	if selectedID == 0 {
+		a.sessions.selectedID = 0
 		return nil
 	}
-	a.sessions.selectedId = selectedId
-	state := a.sessionState(selectedId)
+	a.sessions.selectedID = selectedID
+	state := a.sessionState(selectedID)
 
-	if !state.historyLoaded { // 未加载指定 sessionId 的历史时
-		msgs, err := a.store.LoadHistory(a.ctx, selectedId)
+	if !state.historyLoaded { // 未加载指定 sessionID 的历史时
+		msgs, err := a.store.LoadHistory(a.ctx, selectedID)
 		if err != nil {
 			state.err = fmt.Errorf("加载会话历史失败: %w", err)
 			return err
@@ -181,25 +181,25 @@ func (a *app) selectSession(selectedId int64) error {
 }
 
 // 重命名指定会话
-func (a *app) renameSession(sessionId int64, title string) error {
+func (a *app) renameSession(sessionID int64, title string) error {
 	cleaned := strings.Join(strings.Fields(title), " ")
 	if cleaned == "" {
 		return errors.New("会话标题不能为空")
 	}
 
-	if err := a.store.UpdateSessionTitle(a.ctx, sessionId, cleaned); err != nil {
+	if err := a.store.UpdateSessionTitle(a.ctx, sessionID, cleaned); err != nil {
 		return fmt.Errorf("重命名会话失败: %w", err)
 	}
 
-	a.sessions.rename(sessionId, cleaned)
+	a.sessions.rename(sessionID, cleaned)
 	a.err = nil
 	return nil
 }
 
 // 删除指定会话
 // 若正在运行则先取消，再清理数据库与内存状态
-func (a *app) deleteSession(sessionId int64) error {
-	if state, ok := a.sessionStates[sessionId]; ok {
+func (a *app) deleteSession(sessionID int64) error {
+	if state, ok := a.sessionStates[sessionID]; ok {
 		if state.cancel != nil {
 			state.cancel()
 			state.cancel = nil
@@ -207,18 +207,18 @@ func (a *app) deleteSession(sessionId int64) error {
 		state.resolveConfirm(false)
 	}
 
-	if err := a.store.DeleteSession(a.ctx, sessionId); err != nil {
+	if err := a.store.DeleteSession(a.ctx, sessionID); err != nil {
 		a.err = fmt.Errorf("删除会话失败: %w", err)
 		return a.err
 	}
 
-	prevSelectedId := a.sessions.selectedId
-	delete(a.sessionStates, sessionId)
-	nextId, _ := a.sessions.remove(sessionId)
+	prevSelectedID := a.sessions.selectedID
+	delete(a.sessionStates, sessionID)
+	nextID, _ := a.sessions.remove(sessionID)
 	a.err = nil
 
-	if nextId != prevSelectedId {
-		return a.selectSession(nextId)
+	if nextID != prevSelectedID {
+		return a.selectSession(nextID)
 	}
 	return nil
 }
@@ -248,36 +248,36 @@ func (a *app) updateUI(fn func()) {
 	}
 }
 
-// 提交本轮用户输入并在后台异步推进 AgentLoop
+// 提交本轮用户输入并在后台异步推进 Loop
 // 所有跨 goroutine 的界面状态更新均通过 a.updateUI 回到主线程执行
-func (a *app) submit(submitId int64, submitInputText string) {
+func (a *app) submit(submitID int64, submitInputText string) {
 	if strings.TrimSpace(a.cfg.APIKey) == "" {
-		a.sessionState(submitId).err = errors.New("请先在设置中配置 APIKey")
+		a.sessionState(submitID).err = errors.New("请先在设置中配置 APIKey")
 		return
 	}
 
-	if submitId == 0 {
-		newId, err := a.lazyCreateSession(submitInputText)
+	if submitID == 0 {
+		newID, err := a.lazyCreateSession(submitInputText)
 		if err != nil {
 			a.sessionState(0).err = err
 			return
 		}
-		submitId = newId
+		submitID = newID
 	}
-	submitState := a.sessionState(submitId)
-	if submitState.sessionRunning {
+	submitState := a.sessionState(submitID)
+	if submitState.running {
 		return
 	}
 	if !submitState.historyLoaded {
-		if err := a.selectSession(submitId); err != nil {
+		if err := a.selectSession(submitID); err != nil {
 			return
 		}
 	}
 
 	submitLoop := submitState.loop // 取得指定 session 的 loop
 	if submitLoop == nil {         // loop 为空，新建
-		submitLoop = agent.NewAgentLoop(a.store, nil)
-		if err := submitLoop.BindSession(a.ctx, submitId); err != nil { // 绑定 loop 至 session
+		submitLoop = agent.NewLoop(a.store, nil)
+		if err := submitLoop.BindSession(a.ctx, submitID); err != nil { // 绑定 loop 至 session
 			submitState.err = err
 			return
 		}
@@ -333,7 +333,7 @@ func (a *app) submit(submitId int64, submitInputText string) {
 
 	turnCtx, cancel := context.WithCancel(a.ctx)
 	submitState.cancel = cancel
-	submitState.sessionRunning = true
+	submitState.running = true
 	submitState.err = nil
 	submitState.inputText = ""
 	submitState.curReply = nil
@@ -354,7 +354,7 @@ func (a *app) submit(submitId int64, submitInputText string) {
 
 		a.updateUI(func() {
 			submitState.syncHistory(history)
-			submitState.sessionRunning = false
+			submitState.running = false
 			submitState.cancel = nil
 			submitState.confirm = nil
 
@@ -388,7 +388,7 @@ func Run(ctx context.Context, store *storage.Store, cfg config.Config, cfgPath s
 	}
 
 	if len(sessions) > 0 { // 默认加载第一条
-		if err := a.selectSession(a.sessions.list[0].Id); err != nil {
+		if err := a.selectSession(a.sessions.list[0].ID); err != nil {
 			return err
 		}
 	}

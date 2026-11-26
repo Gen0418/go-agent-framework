@@ -14,7 +14,7 @@ var reasoningEfforts = []string{"low", "high", "max"}
 
 // 输入区
 type composerProps struct {
-	sessionId     int64
+	sessionID     int64
 	inputText     *string
 	model         string
 	opts          *apis.StreamOptions
@@ -29,7 +29,7 @@ type composerProps struct {
 // 底部输入区组件
 // 输入框、会话选项浮层、发送/停止按钮
 func renderComposer(c *ui.Context, props composerProps) {
-	ui.TextArea(c.Key(inputKey(props.sessionId)), props.inputText)
+	ui.TextArea(c.Key(inputKey(props.sessionID)), props.inputText)
 	ui.Row(c).Children(func() {
 		props.optsPopover.view(c, props.model, props.opts, props.hasTools, props.onToggleTools)
 		renderSubmitButton(c, props)

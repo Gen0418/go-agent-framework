@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	cfg, err := config.NewConfigFromEnv()
+	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,26 +40,26 @@ func main() {
 	}
 	defer store.Close()
 
-	terminal := cli.NewCli(os.Stdin, os.Stdout)
-	mainLoop := agent.NewAgentLoop(store, reg)
+	terminal := cli.New(os.Stdin, os.Stdout)
+	mainLoop := agent.NewLoop(store, reg)
 	selectDone := false // 选择或新建会话
 	for !selectDone {
-		sessionId, err := terminal.SelectSession(ctx)
-		if err != nil || sessionId == -1 {
+		sessionID, err := terminal.SelectSession(ctx)
+		if err != nil || sessionID == -1 {
 			if errors.Is(err, io.EOF) {
 				fmt.Println("程序终止")
 				return
 			}
 			continue
 		}
-		if sessionId == 0 {
+		if sessionID == 0 {
 			if err := mainLoop.NewSession(ctx, "test"); err != nil {
 				log.Fatal(err)
 			}
 		} else {
-			if err := mainLoop.BindSession(ctx, sessionId); err != nil {
+			if err := mainLoop.BindSession(ctx, sessionID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					fmt.Printf("指定 sesionId %d 不存在\n", sessionId)
+					fmt.Printf("指定 sessionID %d 不存在\n", sessionID)
 					continue
 				}
 				log.Fatal(err)
@@ -84,7 +84,7 @@ func main() {
 			Client:  client,
 			Opts:    opts,
 			Output:  terminal.WriteOutput,
-			Confirm: terminal.ConfirmOperateByUser,
+			Confirm: terminal.Confirm,
 		}); err != nil {
 			if errors.Is(err, io.EOF) {
 				fmt.Println("\n工具确认已中断，会话终止")

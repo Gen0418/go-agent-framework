@@ -47,9 +47,9 @@ func TestOpenPreservesHistory(t *testing.T) {
 	store := openTestStore(t, path)
 
 	title := "SAISON 的 'SQLite' 会话"
-	sessionId := createTestSession(t, store, title)
+	sessionID := createTestSession(t, store, title)
 	call := apis.ToolCall{
-		Id:   "call-1",
+		ID:   "call-1",
 		Type: "function",
 		Function: apis.ToolCallFunction{
 			Name: "bash",
@@ -59,10 +59,10 @@ func TestOpenPreservesHistory(t *testing.T) {
 	want := []apis.Message{
 		{Role: "user", Content: "这条消息能重开后读到吗？"},
 		{Role: "assistant", Content: "可以。", ReasoningContent: "验证重开后的消息", ToolCalls: []apis.ToolCall{call}},
-		{Role: "tool", ToolCallId: "call-1", Content: "/workspace"},
+		{Role: "tool", ToolCallID: "call-1", Content: "/workspace"},
 	}
 	for _, msg := range want {
-		if err := store.AppendMessage(t.Context(), sessionId, msg); err != nil {
+		if err := store.AppendMessage(t.Context(), sessionID, msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,7 +71,7 @@ func TestOpenPreservesHistory(t *testing.T) {
 	}
 
 	reopened := openTestStore(t, path)
-	gotTitle, err := reopened.QuerySession(t.Context(), sessionId)
+	gotTitle, err := reopened.QuerySession(t.Context(), sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestOpenPreservesHistory(t *testing.T) {
 		t.Fatalf("会话标题 = %q，预期为 %q", gotTitle, title)
 	}
 
-	assertHistory(t, reopened, sessionId, want)
+	assertHistory(t, reopened, sessionID, want)
 }
 
 func TestOpenRejectsUnsupportedVersion(t *testing.T) {
@@ -146,26 +146,26 @@ func TestOpenRollsBackFailedMigration(t *testing.T) {
 
 func TestLoadHistoryBySession(t *testing.T) {
 	store := openTestStore(t, ":memory:")
-	firstId := createTestSession(t, store, "第一个会话")
-	secondId := createTestSession(t, store, "第二个会话")
+	firstID := createTestSession(t, store, "第一个会话")
+	secondID := createTestSession(t, store, "第二个会话")
 
-	assertHistory(t, store, firstId, nil)
+	assertHistory(t, store, firstID, nil)
 
 	first := apis.Message{Role: "user", Content: "你好，'SAISON'\n第二行"}
 	second := apis.Message{Role: "user", Content: "另一条会话"}
 	reply := apis.Message{Role: "assistant", Content: "收到。", ReasoningContent: "思考内容"}
-	if err := store.AppendMessage(t.Context(), firstId, first); err != nil {
+	if err := store.AppendMessage(t.Context(), firstID, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendMessage(t.Context(), secondId, second); err != nil {
+	if err := store.AppendMessage(t.Context(), secondID, second); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendMessage(t.Context(), firstId, reply); err != nil {
+	if err := store.AppendMessage(t.Context(), firstID, reply); err != nil {
 		t.Fatal(err)
 	}
 
-	assertHistory(t, store, firstId, []apis.Message{first, reply})
-	assertHistory(t, store, secondId, []apis.Message{second})
+	assertHistory(t, store, firstID, []apis.Message{first, reply})
+	assertHistory(t, store, secondID, []apis.Message{second})
 
 	// 不存在的会话返回包装后的 sql.ErrNoRows
 	if _, err := store.LoadHistory(t.Context(), 9999); !errors.Is(err, sql.ErrNoRows) {
@@ -173,29 +173,29 @@ func TestLoadHistoryBySession(t *testing.T) {
 	}
 
 	// tool_calls JSON 损坏时报错
-	brokenId := createTestSession(t, store, "损坏会话")
+	brokenID := createTestSession(t, store, "损坏会话")
 	if _, err := store.db.ExecContext(t.Context(),
 		`INSERT INTO messages (session_id, role, tool_calls) VALUES (?, 'assistant', '[')`,
-		brokenId,
+		brokenID,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.LoadHistory(t.Context(), brokenId); err == nil {
+	if _, err := store.LoadHistory(t.Context(), brokenID); err == nil {
 		t.Fatal("损坏的 tool_calls JSON 应返回错误")
 	}
 }
 
 func TestAppendMessageUpdatesSession(t *testing.T) {
 	store := openTestStore(t, ":memory:")
-	sessionId := createTestSession(t, store, "更新时间")
+	sessionID := createTestSession(t, store, "更新时间")
 
 	const previous = "2000-01-01 00:00:00"
 	if _, err := store.db.ExecContext(t.Context(),
-		"UPDATE sessions SET updated_at = ? WHERE id = ?", previous, sessionId,
+		"UPDATE sessions SET updated_at = ? WHERE id = ?", previous, sessionID,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendMessage(t.Context(), sessionId, apis.Message{
+	if err := store.AppendMessage(t.Context(), sessionID, apis.Message{
 		Role:    "user",
 		Content: "新消息",
 	}); err != nil {
@@ -204,7 +204,7 @@ func TestAppendMessageUpdatesSession(t *testing.T) {
 
 	var updatedAt string
 	if err := store.db.QueryRowContext(t.Context(),
-		"SELECT updated_at FROM sessions WHERE id = ?", sessionId,
+		"SELECT updated_at FROM sessions WHERE id = ?", sessionID,
 	).Scan(&updatedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -215,9 +215,9 @@ func TestAppendMessageUpdatesSession(t *testing.T) {
 
 func TestAppendMessageRollsBackForMissingSession(t *testing.T) {
 	store := openTestStore(t, ":memory:")
-	const missingSessionId int64 = 42
+	const missingSessionID int64 = 42
 
-	err := store.AppendMessage(t.Context(), missingSessionId, apis.Message{
+	err := store.AppendMessage(t.Context(), missingSessionID, apis.Message{
 		Role:    "user",
 		Content: "应随事务回滚的消息",
 	})
@@ -227,7 +227,7 @@ func TestAppendMessageRollsBackForMissingSession(t *testing.T) {
 
 	var count int
 	if err := store.db.QueryRowContext(t.Context(),
-		`SELECT count(*) FROM messages WHERE session_id = ?`, missingSessionId,
+		`SELECT count(*) FROM messages WHERE session_id = ?`, missingSessionID,
 	).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
@@ -238,14 +238,14 @@ func TestAppendMessageRollsBackForMissingSession(t *testing.T) {
 
 func TestUpdateSessionTitle(t *testing.T) {
 	store := openTestStore(t, ":memory:")
-	firstId := createTestSession(t, store, "旧标题")
-	secondId := createTestSession(t, store, "另一会话")
+	firstID := createTestSession(t, store, "旧标题")
+	secondID := createTestSession(t, store, "另一会话")
 
-	if err := store.UpdateSessionTitle(t.Context(), firstId, "新标题"); err != nil {
+	if err := store.UpdateSessionTitle(t.Context(), firstID, "新标题"); err != nil {
 		t.Fatal(err)
 	}
 
-	gotFirst, err := store.QuerySession(t.Context(), firstId)
+	gotFirst, err := store.QuerySession(t.Context(), firstID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestUpdateSessionTitle(t *testing.T) {
 	}
 
 	// 不影响其他会话
-	gotSecond, err := store.QuerySession(t.Context(), secondId)
+	gotSecond, err := store.QuerySession(t.Context(), secondID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,10 +271,10 @@ func TestUpdateSessionTitle(t *testing.T) {
 
 func TestDeleteSession(t *testing.T) {
 	store := openTestStore(t, ":memory:")
-	targetId := createTestSession(t, store, "待删除会话")
-	keepId := createTestSession(t, store, "保留会话")
+	targetID := createTestSession(t, store, "待删除会话")
+	keepID := createTestSession(t, store, "保留会话")
 
-	for _, sid := range []int64{targetId, keepId} {
+	for _, sid := range []int64{targetID, keepID} {
 		if err := store.AppendMessage(t.Context(), sid, apis.Message{
 			Role:    "user",
 			Content: "测试消息",
@@ -288,22 +288,22 @@ func TestDeleteSession(t *testing.T) {
 		}
 	}
 
-	if err := store.DeleteSession(t.Context(), targetId); err != nil {
+	if err := store.DeleteSession(t.Context(), targetID); err != nil {
 		t.Fatal(err)
 	}
 
 	// 目标会话及其关联消息、api_calls 均应清理干净
-	if _, err := store.QuerySession(t.Context(), targetId); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := store.QuerySession(t.Context(), targetID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("删除后查询目标会话返回 = %v，预期 sql.ErrNoRows", err)
 	}
 	var targetMsgs, targetCalls int
 	if err := store.db.QueryRowContext(t.Context(),
-		`SELECT count(*) FROM messages WHERE session_id = ?`, targetId,
+		`SELECT count(*) FROM messages WHERE session_id = ?`, targetID,
 	).Scan(&targetMsgs); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.db.QueryRowContext(t.Context(),
-		`SELECT count(*) FROM api_calls WHERE session_id = ?`, targetId,
+		`SELECT count(*) FROM api_calls WHERE session_id = ?`, targetID,
 	).Scan(&targetCalls); err != nil {
 		t.Fatal(err)
 	}
@@ -312,16 +312,16 @@ func TestDeleteSession(t *testing.T) {
 	}
 
 	// 其他会话的数据保持完整
-	gotKeepTitle, err := store.QuerySession(t.Context(), keepId)
+	gotKeepTitle, err := store.QuerySession(t.Context(), keepID)
 	if err != nil || gotKeepTitle != "保留会话" {
 		t.Fatalf("保留会话标题 = %q, err = %v", gotKeepTitle, err)
 	}
-	assertHistory(t, store, keepId, []apis.Message{
+	assertHistory(t, store, keepID, []apis.Message{
 		{Role: "user", Content: "测试消息"},
 	})
 	var keepCalls int
 	if err := store.db.QueryRowContext(t.Context(),
-		`SELECT count(*) FROM api_calls WHERE session_id = ?`, keepId,
+		`SELECT count(*) FROM api_calls WHERE session_id = ?`, keepID,
 	).Scan(&keepCalls); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestDeleteSession(t *testing.T) {
 	}
 
 	// 重复删除或不存在的会话返回 sql.ErrNoRows
-	if err := store.DeleteSession(t.Context(), targetId); !errors.Is(err, sql.ErrNoRows) {
+	if err := store.DeleteSession(t.Context(), targetID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("重复删除返回错误 = %v，预期包装 sql.ErrNoRows", err)
 	}
 }
@@ -374,13 +374,13 @@ func createTestSession(t *testing.T, store *Store, title string) int64 {
 	return id
 }
 
-func assertHistory(t *testing.T, store *Store, sessionId int64, want []apis.Message) {
+func assertHistory(t *testing.T, store *Store, sessionID int64, want []apis.Message) {
 	t.Helper()
-	got, err := store.LoadHistory(t.Context(), sessionId)
+	got, err := store.LoadHistory(t.Context(), sessionID)
 	if err != nil {
-		t.Fatalf("查询会话 %d 的消息失败: %v", sessionId, err)
+		t.Fatalf("查询会话 %d 的消息失败: %v", sessionID, err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("会话 %d 的消息 = %+v，预期为 %+v", sessionId, got, want)
+		t.Fatalf("会话 %d 的消息 = %+v，预期为 %+v", sessionID, got, want)
 	}
 }

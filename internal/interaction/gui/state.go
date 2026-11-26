@@ -15,16 +15,16 @@ type inputKey int64
 
 // 单会话状态
 type sessionState struct {
-	loop           *agent.AgentLoop   // 会话所绑定AgentLoop
-	opts           apis.StreamOptions // 会话设置项(Thinking/ReasoningEffort/Tools)
-	messages       []*chatMessage
-	curReply       *chatMessage
-	confirm        *confirmToolCall
-	inputText      string // 提交内容
-	historyLoaded  bool   // 判断会话内容是否已加载
-	sessionRunning bool   // 判断会话是否正在运行
-	cancel         context.CancelFunc
-	err            error // 会话级错误
+	loop          *agent.Loop        // 会话所绑定 Loop
+	opts          apis.StreamOptions // 会话设置项(Thinking/ReasoningEffort/Tools)
+	messages      []*chatMessage
+	curReply      *chatMessage
+	confirm       *confirmToolCall
+	inputText     string // 提交内容
+	historyLoaded bool   // 判断会话内容是否已加载
+	running       bool   // 判断会话是否正在运行
+	cancel        context.CancelFunc
+	err           error // 会话级错误
 }
 
 // 按结构化事件追加流式输出
@@ -35,7 +35,7 @@ func (s *sessionState) appendStreamEvent(event agent.OutputEvent) {
 			Message: apis.Message{
 				Role:       "tool",
 				Content:    event.Text,
-				ToolCallId: event.ToolCallId,
+				ToolCallID: event.ToolCallID,
 			},
 		})
 		s.curReply = nil
@@ -112,17 +112,17 @@ type confirmToolCall struct {
 // 全会话列表
 type sessionList struct {
 	list       []storage.Session // 全部会话列表
-	selectedId int64             // 当前选中会话
+	selectedID int64             // 当前选中会话
 }
 
 func (l *sessionList) indexOf(id int64) int {
 	return slices.IndexFunc(l.list, func(s storage.Session) bool {
-		return s.Id == id
+		return s.ID == id
 	})
 }
 
 func (l *sessionList) selected() (storage.Session, bool) {
-	idx := l.indexOf(l.selectedId)
+	idx := l.indexOf(l.selectedID)
 	if idx < 0 {
 		return storage.Session{}, false
 	}
@@ -147,22 +147,22 @@ func (l *sessionList) rename(id int64, title string) bool {
 func (l *sessionList) remove(id int64) (int64, bool) {
 	idx := l.indexOf(id)
 	if idx < 0 {
-		return l.selectedId, false
+		return l.selectedID, false
 	}
 
 	l.list = slices.Delete(l.list, idx, idx+1)
-	if l.selectedId != id {
-		return l.selectedId, true
+	if l.selectedID != id {
+		return l.selectedID, true
 	}
 
 	if len(l.list) == 0 {
-		l.selectedId = 0
+		l.selectedID = 0
 	} else if idx < len(l.list) {
-		l.selectedId = l.list[idx].Id
+		l.selectedID = l.list[idx].ID
 	} else {
-		l.selectedId = l.list[len(l.list)-1].Id
+		l.selectedID = l.list[len(l.list)-1].ID
 	}
-	return l.selectedId, true
+	return l.selectedID, true
 }
 
 type chatMessage struct {

@@ -13,7 +13,7 @@ import (
 // 包含标题输入框、错误提示及取消/保存按钮，支持回车提交
 type renameDialog struct {
 	visible   bool
-	sessionId int64
+	sessionID int64
 	title     string
 	err       error
 }
@@ -21,7 +21,7 @@ type renameDialog struct {
 func (d *renameDialog) open(session storage.Session) {
 	*d = renameDialog{
 		visible:   true,
-		sessionId: session.Id,
+		sessionID: session.ID,
 		title:     session.Title,
 	}
 }
@@ -31,11 +31,11 @@ func (d *renameDialog) close() {
 	d.err = nil
 }
 
-func (d *renameDialog) view(c *ui.Context, onSave func(sessionId int64, title string) error) {
+func (d *renameDialog) view(c *ui.Context, onSave func(sessionID int64, title string) error) {
 	ui.Modal(c, &d.visible, func() {
 		ui.Column(c).Children(func() {
 			ui.Text(c, "重命名会话")
-			submitted := ui.TextInput(c.Key(d.sessionId), &d.title).Submitted()
+			submitted := ui.TextInput(c.Key(d.sessionID), &d.title).Submitted()
 			if d.err != nil {
 				ui.Text(c, d.err.Error())
 			}
@@ -44,7 +44,7 @@ func (d *renameDialog) view(c *ui.Context, onSave func(sessionId int64, title st
 					d.close()
 				}
 				if ui.Button(c, "保存").Clicked() || submitted {
-					if err := onSave(d.sessionId, d.title); err != nil {
+					if err := onSave(d.sessionID, d.title); err != nil {
 						d.err = err
 						return
 					}
@@ -59,7 +59,7 @@ func (d *renameDialog) view(c *ui.Context, onSave func(sessionId int64, title st
 // 包含待删会话提示、错误展示及取消/确认删除按钮
 type deleteDialog struct {
 	visible   bool
-	sessionId int64
+	sessionID int64
 	title     string
 	err       error
 }
@@ -67,7 +67,7 @@ type deleteDialog struct {
 func (d *deleteDialog) open(session storage.Session) {
 	*d = deleteDialog{
 		visible:   true,
-		sessionId: session.Id,
+		sessionID: session.ID,
 		title:     session.Title,
 	}
 }
@@ -77,7 +77,7 @@ func (d *deleteDialog) close() {
 	d.err = nil
 }
 
-func (d *deleteDialog) view(c *ui.Context, onConfirm func(sessionId int64) error) {
+func (d *deleteDialog) view(c *ui.Context, onConfirm func(sessionID int64) error) {
 	ui.Modal(c, &d.visible, func() {
 		ui.Column(c).Children(func() {
 			ui.Text(c, "删除会话")
@@ -90,7 +90,7 @@ func (d *deleteDialog) view(c *ui.Context, onConfirm func(sessionId int64) error
 					d.close()
 				}
 				if ui.Button(c, "确认删除").Clicked() {
-					if err := onConfirm(d.sessionId); err != nil {
+					if err := onConfirm(d.sessionID); err != nil {
 						d.err = err
 						return
 					}

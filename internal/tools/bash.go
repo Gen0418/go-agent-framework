@@ -59,7 +59,7 @@ func (Bash) Run(ctx context.Context, dir, rawArgs string, confirm ConfirmFunc) (
 		return "用户拒绝执行", nil
 	}
 
-	toolOutput, err := ExecBash(ctx, dir, args.Command)
+	toolOutput, err := execBash(ctx, dir, args.Command)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", ctxErr
 	}
@@ -70,7 +70,7 @@ func (Bash) Run(ctx context.Context, dir, rawArgs string, confirm ConfirmFunc) (
 	return toolOutput, nil
 }
 
-func ExecBash(ctx context.Context, dir, command string) (string, error) {
+func execBash(ctx context.Context, dir, command string) (string, error) {
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = dir
 

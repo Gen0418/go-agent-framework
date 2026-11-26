@@ -7,7 +7,7 @@ import (
 )
 
 type chatProps struct {
-	sessionId int64
+	sessionID int64
 	title     string
 	err       error
 	messages  []*chatMessage
@@ -26,7 +26,7 @@ func renderChat(c *ui.Context, props chatProps) {
 			ui.Text(c, props.err.Error())
 		}
 
-		ui.Scroll(c.Key(scrollKey(props.sessionId))).Grow(1).Children(func() {
+		ui.Scroll(c.Key(scrollKey(props.sessionID))).Grow(1).Children(func() {
 			for _, msg := range props.messages {
 				renderMessage(c, msg)
 			}

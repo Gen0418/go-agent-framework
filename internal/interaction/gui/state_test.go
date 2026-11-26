@@ -31,34 +31,34 @@ func TestMakeSessionTitle(t *testing.T) {
 
 func TestSessionListAddAndSelected(t *testing.T) {
 	list := sessionList{
-		list: []storage.Session{{Id: 1, Title: "旧会话"}},
+		list: []storage.Session{{ID: 1, Title: "旧会话"}},
 	}
-	list.add(storage.Session{Id: 2, Title: "新会话"})
+	list.add(storage.Session{ID: 2, Title: "新会话"})
 
-	if len(list.list) != 2 || list.list[0].Id != 2 || list.list[1].Id != 1 {
+	if len(list.list) != 2 || list.list[0].ID != 2 || list.list[1].ID != 1 {
 		t.Fatalf("add 后列表顺序 = %+v", list.list)
 	}
 
-	list.selectedId = 2
+	list.selectedID = 2
 	got, ok := list.selected()
 	if !ok || got.Title != "新会话" {
 		t.Fatalf("selected() = (%+v, %v)，预期选中新会话", got, ok)
 	}
 
-	list.selectedId = 99
+	list.selectedID = 99
 	if _, ok := list.selected(); ok {
-		t.Fatal("不存在的 selectedId 不应匹配")
+		t.Fatal("不存在的 selectedID 不应匹配")
 	}
 }
 
 func TestSessionListRenameAndRemove(t *testing.T) {
 	list := sessionList{
 		list: []storage.Session{
-			{Id: 3, Title: "会话3"},
-			{Id: 2, Title: "会话2"},
-			{Id: 1, Title: "会话1"},
+			{ID: 3, Title: "会话3"},
+			{ID: 2, Title: "会话2"},
+			{ID: 1, Title: "会话1"},
 		},
-		selectedId: 2,
+		selectedID: 2,
 	}
 
 	// 重命名已存在和不存在的会话
@@ -69,47 +69,47 @@ func TestSessionListRenameAndRemove(t *testing.T) {
 		t.Fatal("重命名不存在的会话应返回 false")
 	}
 
-	// 删除非当前选中会话，保持 selectedId 不变
-	nextId, ok := list.remove(3)
-	if !ok || nextId != 2 || list.selectedId != 2 || len(list.list) != 2 {
-		t.Fatalf("删除非选中项后 nextId=%d, ok=%v, list=%+v", nextId, ok, list.list)
+	// 删除非当前选中会话，保持 selectedID 不变
+	nextID, ok := list.remove(3)
+	if !ok || nextID != 2 || list.selectedID != 2 || len(list.list) != 2 {
+		t.Fatalf("删除非选中项后 nextID=%d, ok=%v, list=%+v", nextID, ok, list.list)
 	}
 
 	// 删除不存在的会话
-	if nextId, ok := list.remove(99); ok || nextId != 2 {
-		t.Fatalf("删除不存在会话返回 nextId=%d, ok=%v", nextId, ok)
+	if nextID, ok := list.remove(99); ok || nextID != 2 {
+		t.Fatalf("删除不存在会话返回 nextID=%d, ok=%v", nextID, ok)
 	}
 
 	// 删除当前选中项（非末尾）时落到原位置的下一个会话
-	nextId, ok = list.remove(2)
-	if !ok || nextId != 1 || list.selectedId != 1 {
-		t.Fatalf("删除当前选中项后 nextId=%d, ok=%v, selectedId=%d", nextId, ok, list.selectedId)
+	nextID, ok = list.remove(2)
+	if !ok || nextID != 1 || list.selectedID != 1 {
+		t.Fatalf("删除当前选中项后 nextID=%d, ok=%v, selectedID=%d", nextID, ok, list.selectedID)
 	}
 
 	// 删除最后一个会话时回退到 0（新对话草稿态）
-	nextId, ok = list.remove(1)
-	if !ok || nextId != 0 || list.selectedId != 0 || len(list.list) != 0 {
-		t.Fatalf("清空列表后 nextId=%d, ok=%v, list=%+v", nextId, ok, list.list)
+	nextID, ok = list.remove(1)
+	if !ok || nextID != 0 || list.selectedID != 0 || len(list.list) != 0 {
+		t.Fatalf("清空列表后 nextID=%d, ok=%v, list=%+v", nextID, ok, list.list)
 	}
 
 	// 删除末尾选中项时回退到前一项
 	tailList := sessionList{
 		list: []storage.Session{
-			{Id: 10, Title: "A"},
-			{Id: 20, Title: "B"},
+			{ID: 10, Title: "A"},
+			{ID: 20, Title: "B"},
 		},
-		selectedId: 20,
+		selectedID: 20,
 	}
-	nextId, ok = tailList.remove(20)
-	if !ok || nextId != 10 || tailList.selectedId != 10 {
-		t.Fatalf("删除末尾选中项后 nextId=%d, ok=%v, selectedId=%d", nextId, ok, tailList.selectedId)
+	nextID, ok = tailList.remove(20)
+	if !ok || nextID != 10 || tailList.selectedID != 10 {
+		t.Fatalf("删除末尾选中项后 nextID=%d, ok=%v, selectedID=%d", nextID, ok, tailList.selectedID)
 	}
 }
 
 func TestSessionStateAppendStreamEvent(t *testing.T) {
 	s := &sessionState{}
 	call := apis.ToolCall{
-		Id:       "call-1",
+		ID:       "call-1",
 		Type:     "function",
 		Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"pwd"}`},
 	}
@@ -118,7 +118,7 @@ func TestSessionStateAppendStreamEvent(t *testing.T) {
 	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputReasoning, Text: "思考2"})
 	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputContent, Text: "正文1"})
 	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputToolCall, ToolCall: &call})
-	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputToolResult, Text: "工具结果", ToolCallId: "call-1"})
+	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputToolResult, Text: "工具结果", ToolCallID: "call-1"})
 	s.appendStreamEvent(agent.OutputEvent{Kind: agent.OutputContent, Text: "总结回复"})
 
 	if len(s.messages) != 3 {
@@ -128,7 +128,7 @@ func TestSessionStateAppendStreamEvent(t *testing.T) {
 		s.messages[0].Content != "正文1" || len(s.messages[0].ToolCalls) != 1 || s.messages[0].ToolCalls[0] != call {
 		t.Fatalf("第 1 条消息 = %+v", s.messages[0].Message)
 	}
-	if s.messages[1].Role != "tool" || s.messages[1].Content != "工具结果" || s.messages[1].ToolCallId != "call-1" {
+	if s.messages[1].Role != "tool" || s.messages[1].Content != "工具结果" || s.messages[1].ToolCallID != "call-1" {
 		t.Fatalf("第 2 条消息 = %+v", s.messages[1].Message)
 	}
 	if s.messages[2].Role != "assistant" || s.messages[2].Content != "总结回复" {

@@ -20,8 +20,8 @@ func TestStreamChatToolCalls(t *testing.T) {
 		Kind:         EventFinish,
 		FinishReason: "tool_calls",
 		ToolCalls: []ToolCall{
-			{Id: "call_read", Type: "function", Function: ToolCallFunction{Name: "read_test_file", Args: `{"path":"测试 文件.txt"}`}},
-			{Id: "call_list", Type: "function", Function: ToolCallFunction{Name: "list_files", Args: `{"dir":"docs"}`}},
+			{ID: "call_read", Type: "function", Function: ToolCallFunction{Name: "read_test_file", Args: `{"path":"测试 文件.txt"}`}},
+			{ID: "call_list", Type: "function", Function: ToolCallFunction{Name: "list_files", Args: `{"dir":"docs"}`}},
 		},
 	}
 

@@ -38,7 +38,7 @@ func (c Config) WithDefaults() Config {
 }
 
 // 从.env和环境变量读取
-func NewConfigFromEnv() (Config, error) {
+func LoadFromEnv() (Config, error) {
 	cfg, err := loadEnvConfig()
 	if err != nil {
 		return cfg, err

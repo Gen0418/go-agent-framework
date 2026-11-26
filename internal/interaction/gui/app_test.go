@@ -31,10 +31,10 @@ func TestSessionOptsPopover(t *testing.T) {
 		},
 		sessions: sessionList{
 			list: []storage.Session{
-				{Id: 1, Title: "会话1"},
-				{Id: 2, Title: "会话2"},
+				{ID: 1, Title: "会话1"},
+				{ID: 2, Title: "会话2"},
 			},
-			selectedId: 1,
+			selectedID: 1,
 		},
 		sessionStates: make(map[int64]*sessionState),
 	}
@@ -74,7 +74,7 @@ func TestSessionOptsPopover(t *testing.T) {
 	}
 
 	// 切换到会话2，选项不受会话1影响
-	a.sessions.selectedId = 2
+	a.sessions.selectedID = 2
 	tt.Frame()
 	s2 := a.sessionState(2)
 	if !s2.opts.Thinking || s2.opts.ReasoningEffort != "low" || len(s2.opts.Tools) != 1 {
@@ -98,8 +98,8 @@ func TestAppRenameSession(t *testing.T) {
 		ctx:   t.Context(),
 		store: store,
 		sessions: sessionList{
-			list:       []storage.Session{{Id: id, Title: "原标题"}},
-			selectedId: id,
+			list:       []storage.Session{{ID: id, Title: "原标题"}},
+			selectedID: id,
 		},
 		sessionStates: make(map[int64]*sessionState),
 	}
@@ -156,16 +156,16 @@ func TestAppDeleteSession(t *testing.T) {
 		store: store,
 		sessions: sessionList{
 			list: []storage.Session{
-				{Id: id2, Title: "会话2"},
-				{Id: id1, Title: "会话1"},
+				{ID: id2, Title: "会话2"},
+				{ID: id1, Title: "会话1"},
 			},
-			selectedId: id2,
+			selectedID: id2,
 		},
 		sessionStates: map[int64]*sessionState{
 			id2: {
-				sessionRunning: true,
-				cancel:         func() { canceled = true },
-				confirm:        confirm,
+				running: true,
+				cancel:  func() { canceled = true },
+				confirm: confirm,
 			},
 		},
 	}
@@ -186,8 +186,8 @@ func TestAppDeleteSession(t *testing.T) {
 	if _, err := store.QuerySession(t.Context(), id2); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("删除后查询会话2 = %v，预期 sql.ErrNoRows", err)
 	}
-	if a.sessions.selectedId != id1 {
-		t.Fatalf("回退选中 = %d，预期 %d", a.sessions.selectedId, id1)
+	if a.sessions.selectedID != id1 {
+		t.Fatalf("回退选中 = %d，预期 %d", a.sessions.selectedID, id1)
 	}
 	s1 := a.sessionState(id1)
 	if !s1.historyLoaded || len(s1.messages) != 1 || s1.messages[0].Content != "会话1历史消息" {
@@ -198,8 +198,8 @@ func TestAppDeleteSession(t *testing.T) {
 	if err := a.deleteSession(id1); err != nil {
 		t.Fatal(err)
 	}
-	if a.sessions.selectedId != 0 || len(a.sessions.list) != 0 {
-		t.Fatalf("清空全部会话后 selectedId=%d, list=%+v", a.sessions.selectedId, a.sessions.list)
+	if a.sessions.selectedID != 0 || len(a.sessions.list) != 0 {
+		t.Fatalf("清空全部会话后 selectedID=%d, list=%+v", a.sessions.selectedID, a.sessions.list)
 	}
 }
 
@@ -224,10 +224,10 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 		store: store,
 		sessions: sessionList{
 			list: []storage.Session{
-				{Id: id2, Title: "会话2"},
-				{Id: id1, Title: "会话1"},
+				{ID: id2, Title: "会话2"},
+				{ID: id1, Title: "会话1"},
 			},
-			selectedId: id2,
+			selectedID: id2,
 		},
 		sessionStates: make(map[int64]*sessionState),
 	}
@@ -279,8 +279,8 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	if a.deleteDialog.visible {
 		t.Fatal("确认删除后弹框应关闭")
 	}
-	if len(a.sessions.list) != 1 || a.sessions.selectedId != id1 {
-		t.Fatalf("删除后状态不符: selectedId=%d, list=%+v", a.sessions.selectedId, a.sessions.list)
+	if len(a.sessions.list) != 1 || a.sessions.selectedID != id1 {
+		t.Fatalf("删除后状态不符: selectedID=%d, list=%+v", a.sessions.selectedID, a.sessions.list)
 	}
 	if _, err := store.QuerySession(t.Context(), id2); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("删除后数据库仍能查到会话 %d: %v", id2, err)
@@ -308,8 +308,8 @@ func TestSubmitRejectsEmptyAPIKey(t *testing.T) {
 	if draft.err == nil || !strings.Contains(draft.err.Error(), "APIKey") {
 		t.Fatalf("空 APIKey 提交应报错提示配置 APIKey，实际 err = %v", draft.err)
 	}
-	if draft.sessionRunning || len(draft.messages) != 0 || draft.inputText != "你好" {
-		t.Fatalf("拦截后不应修改草稿状态: running=%v, msgs=%d, input=%q", draft.sessionRunning, len(draft.messages), draft.inputText)
+	if draft.running || len(draft.messages) != 0 || draft.inputText != "你好" {
+		t.Fatalf("拦截后不应修改草稿状态: running=%v, msgs=%d, input=%q", draft.running, len(draft.messages), draft.inputText)
 	}
 	sessions, err := store.ListSessions(t.Context())
 	if err != nil {
@@ -392,24 +392,24 @@ func TestSubmitBlocksWhenHistoryLoadFails(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	// 构造一个不存在的 sessionId，触发加载历史失败
-	const missingId int64 = 999
+	// 构造一个不存在的 sessionID，触发加载历史失败
+	const missingID int64 = 999
 	a := &app{
 		ctx:           t.Context(),
 		store:         store,
 		cfg:           config.Config{APIKey: "sk-test", Endpoint: "https://example.invalid", DefaultModel: "m"},
 		sessionStates: make(map[int64]*sessionState),
 	}
-	state := a.sessionState(missingId)
+	state := a.sessionState(missingID)
 	state.inputText = "不应该发出去"
 
-	a.submit(missingId, state.inputText)
+	a.submit(missingID, state.inputText)
 
 	if state.err == nil || !strings.Contains(state.err.Error(), "加载会话历史失败") {
 		t.Fatalf("历史未加载且重载失败时应报错，实际 err = %v", state.err)
 	}
-	if state.sessionRunning || len(state.messages) != 0 || state.inputText != "不应该发出去" {
-		t.Fatalf("拦截后不应变更会话状态: running=%v, msgs=%d, input=%q", state.sessionRunning, len(state.messages), state.inputText)
+	if state.running || len(state.messages) != 0 || state.inputText != "不应该发出去" {
+		t.Fatalf("拦截后不应变更会话状态: running=%v, msgs=%d, input=%q", state.running, len(state.messages), state.inputText)
 	}
 }
 
@@ -473,10 +473,10 @@ func TestMultiSessionConfirmSwitchAndPersistence(t *testing.T) {
 		},
 		sessions: sessionList{
 			list: []storage.Session{
-				{Id: idA, Title: "会话A"},
-				{Id: idB, Title: "会话B"},
+				{ID: idA, Title: "会话A"},
+				{ID: idB, Title: "会话B"},
 			},
-			selectedId: idA,
+			selectedID: idA,
 		},
 		sessionStates: make(map[int64]*sessionState),
 	}
@@ -508,11 +508,11 @@ func TestMultiSessionConfirmSwitchAndPersistence(t *testing.T) {
 	}
 	stateB := a.sessionState(idB)
 	a.submit(idB, "你好B")
-	waitUntil(func() bool { return !stateB.sessionRunning }, "会话 B 完成生成")
+	waitUntil(func() bool { return !stateB.running }, "会话 B 完成生成")
 	if stateB.err != nil {
 		t.Fatalf("会话 B 出错: %v", stateB.err)
 	}
-	if stateA.confirm == nil || !stateA.sessionRunning {
+	if stateA.confirm == nil || !stateA.running {
 		t.Fatal("切到会话 B 后不应丢失会话 A 的待确认或运行状态")
 	}
 
@@ -521,7 +521,7 @@ func TestMultiSessionConfirmSwitchAndPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateA.resolveConfirm(true)
-	waitUntil(func() bool { return !stateA.sessionRunning }, "会话 A 完成工具调用与最终回复")
+	waitUntil(func() bool { return !stateA.running }, "会话 A 完成工具调用与最终回复")
 	if stateA.err != nil {
 		t.Fatalf("会话 A 出错: %v", stateA.err)
 	}

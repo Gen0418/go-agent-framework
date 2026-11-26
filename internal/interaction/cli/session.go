@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-func (c *Cli) SelectSession(ctx context.Context) (int64, error) {
-	fmt.Println("输入 new 新建会话，或输入 sessionId 来加载会话")
+func (c *CLI) SelectSession(ctx context.Context) (int64, error) {
+	fmt.Println("输入 new 新建会话，或输入 sessionID 来加载会话")
 	input, err := c.ReadInput(ctx)
 	if err != nil {
 		return -1, err
@@ -18,9 +18,9 @@ func (c *Cli) SelectSession(ctx context.Context) (int64, error) {
 		return 0, nil
 	}
 
-	sessionId, err := strconv.ParseInt(strings.TrimSpace(input), 10, 64)
-	if err != nil || sessionId <= 0 {
+	sessionID, err := strconv.ParseInt(strings.TrimSpace(input), 10, 64)
+	if err != nil || sessionID <= 0 {
 		return -1, err
 	}
-	return sessionId, err
+	return sessionID, err
 }

@@ -7,7 +7,7 @@ type Message struct {
 	Content          string     `json:"content"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallId       string     `json:"tool_call_id,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 type enableThinking struct {

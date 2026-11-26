@@ -17,12 +17,12 @@ import (
 // Store 抽象会话与消息持久化依赖
 type Store interface {
 	CreateSession(ctx context.Context, title string) (int64, error)
-	AppendMessage(ctx context.Context, sessionId int64, msg apis.Message) error
-	LoadHistory(ctx context.Context, sessionId int64) ([]apis.Message, error)
+	AppendMessage(ctx context.Context, sessionID int64, msg apis.Message) error
+	LoadHistory(ctx context.Context, sessionID int64) ([]apis.Message, error)
 }
 
-type AgentLoop struct {
-	sessionId int64 // 绑定会话Id
+type Loop struct {
+	sessionID int64 // 绑定会话ID
 	tools     *tools.Registry
 	msgs      []apis.Message // 本会话的对话历史
 	store     Store
@@ -45,7 +45,7 @@ type OutputEvent struct {
 	Kind       OutputKind
 	Text       string
 	ToolCall   *apis.ToolCall
-	ToolCallId string
+	ToolCallID string
 }
 
 // TurnRequest 描述推进单轮对话所需的输入、客户端、流式选项与回调
@@ -58,50 +58,50 @@ type TurnRequest struct {
 	Confirm ConfirmFunc
 }
 
-func NewAgentLoop(store Store, reg *tools.Registry) *AgentLoop {
+func NewLoop(store Store, reg *tools.Registry) *Loop {
 	if reg == nil {
 		reg = tools.DefaultRegistry()
 	}
-	return &AgentLoop{
+	return &Loop{
 		store: store,
 		tools: reg,
 	}
 }
 
-func (l *AgentLoop) SessionId() int64 {
-	return l.sessionId
+func (l *Loop) SessionID() int64 {
+	return l.sessionID
 }
 
-func (l *AgentLoop) NewSession(ctx context.Context, title string) error {
-	sessionId, err := l.store.CreateSession(ctx, title)
+func (l *Loop) NewSession(ctx context.Context, title string) error {
+	sessionID, err := l.store.CreateSession(ctx, title)
 	if err != nil {
 		return err
 	}
 
-	l.sessionId = sessionId
+	l.sessionID = sessionID
 	l.msgs = make([]apis.Message, 0)
 	return nil
 }
 
-func (l *AgentLoop) History() []apis.Message {
+func (l *Loop) History() []apis.Message {
 	return l.msgs
 }
 
 // 将 Loop 绑定到会话
-func (l *AgentLoop) BindSession(ctx context.Context, sessionId int64) error {
-	msgs, err := l.store.LoadHistory(ctx, sessionId)
+func (l *Loop) BindSession(ctx context.Context, sessionID int64) error {
+	msgs, err := l.store.LoadHistory(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 
-	l.sessionId = sessionId
+	l.sessionID = sessionID
 	l.msgs = msgs
 
 	return nil
 }
 
 // 推进对话轮次
-func (l *AgentLoop) RunTurn(ctx context.Context, req TurnRequest) error {
+func (l *Loop) RunTurn(ctx context.Context, req TurnRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -182,7 +182,7 @@ func (l *AgentLoop) RunTurn(ctx context.Context, req TurnRequest) error {
 			msg := apis.Message{
 				Role:       "tool",
 				Content:    toolOutput,
-				ToolCallId: call.Id,
+				ToolCallID: call.ID,
 			}
 
 			if err := l.appendMessage(ctx, msg); err != nil {
@@ -192,7 +192,7 @@ func (l *AgentLoop) RunTurn(ctx context.Context, req TurnRequest) error {
 			if err := outputFunc(ctx, OutputEvent{
 				Kind:       OutputToolResult,
 				Text:       toolOutput,
-				ToolCallId: call.Id,
+				ToolCallID: call.ID,
 			}); err != nil {
 				if saveErr := l.cancelRemainingToolCalls(ctx, output.ToolCalls[i+1:], outputFunc); saveErr != nil {
 					return errors.Join(err, saveErr)
@@ -204,7 +204,7 @@ func (l *AgentLoop) RunTurn(ctx context.Context, req TurnRequest) error {
 }
 
 // 取消时补写工具调用结果
-func (l *AgentLoop) cancelRemainingToolCalls(ctx context.Context, calls []apis.ToolCall, outputFunc OutputFunc) error {
+func (l *Loop) cancelRemainingToolCalls(ctx context.Context, calls []apis.ToolCall, outputFunc OutputFunc) error {
 	if len(calls) == 0 {
 		return nil
 	}
@@ -215,7 +215,7 @@ func (l *AgentLoop) cancelRemainingToolCalls(ctx context.Context, calls []apis.T
 		msg := apis.Message{
 			Role:       "tool",
 			Content:    "已取消",
-			ToolCallId: call.Id,
+			ToolCallID: call.ID,
 		}
 		if err := l.appendMessage(saveCtx, msg); err != nil {
 			return err
@@ -223,14 +223,14 @@ func (l *AgentLoop) cancelRemainingToolCalls(ctx context.Context, calls []apis.T
 		_ = outputFunc(saveCtx, OutputEvent{
 			Kind:       OutputToolResult,
 			Text:       msg.Content,
-			ToolCallId: call.Id,
+			ToolCallID: call.ID,
 		})
 	}
 	return nil
 }
 
 // 执行工具调用：返回字符串交由模型处理，返回 error 表示程序级或取消中断错误
-func (l *AgentLoop) runToolCall(ctx context.Context, call apis.ToolCall, dir string, confirm ConfirmFunc) (string, error) {
+func (l *Loop) runToolCall(ctx context.Context, call apis.ToolCall, dir string, confirm ConfirmFunc) (string, error) {
 	reg := l.tools
 	if reg == nil {
 		reg = tools.DefaultRegistry()
@@ -239,7 +239,7 @@ func (l *AgentLoop) runToolCall(ctx context.Context, call apis.ToolCall, dir str
 }
 
 // 读取模型回复
-func (l *AgentLoop) readReply(ctx context.Context, client *apis.Client, opts apis.StreamOptions, outputFunc OutputFunc) (apis.Message, string, error) {
+func (l *Loop) readReply(ctx context.Context, client *apis.Client, opts apis.StreamOptions, outputFunc OutputFunc) (apis.Message, string, error) {
 	var output, reasoningOutput strings.Builder // 输出内容缓冲区
 	var calls []apis.ToolCall                   // 记录工具调用
 	var finishReason string
@@ -303,8 +303,8 @@ func (l *AgentLoop) readReply(ctx context.Context, client *apis.Client, opts api
 }
 
 // 将 msg 追加至对话历史，并持久化储存
-func (l *AgentLoop) appendMessage(ctx context.Context, msg apis.Message) error {
-	if err := l.store.AppendMessage(ctx, l.sessionId, msg); err != nil {
+func (l *Loop) appendMessage(ctx context.Context, msg apis.Message) error {
+	if err := l.store.AppendMessage(ctx, l.sessionID, msg); err != nil {
 		return fmt.Errorf("追加对话历史，储存失败: %w", err)
 	}
 

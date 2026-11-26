@@ -7,11 +7,11 @@ import (
 )
 
 type Session struct {
-	Id    int64
+	ID    int64
 	Title string
 }
 
-// CreateSession 创建 sessions 记录，返回 sessionId
+// CreateSession 创建 sessions 记录，返回 sessionID
 func (s *Store) CreateSession(ctx context.Context, title string) (int64, error) {
 	res, err := s.db.ExecContext(ctx, "INSERT INTO sessions (title) VALUES (?)", title)
 	if err != nil {
@@ -20,13 +20,13 @@ func (s *Store) CreateSession(ctx context.Context, title string) (int64, error) 
 	return res.LastInsertId()
 }
 
-// QuerySession 按 sessionId 查询会话标题
-func (s *Store) QuerySession(ctx context.Context, sessionId int64) (string, error) {
+// QuerySession 按 sessionID 查询会话标题
+func (s *Store) QuerySession(ctx context.Context, sessionID int64) (string, error) {
 	var title string
 	err := s.db.QueryRowContext(
 		ctx,
 		`SELECT title FROM sessions WHERE id = ?`,
-		sessionId,
+		sessionID,
 	).Scan(&title)
 	if err != nil {
 		return "", fmt.Errorf("查询 sessions 失败: %w", err)
@@ -48,7 +48,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 
 	for rows.Next() {
 		var session Session
-		if err := rows.Scan(&session.Id, &session.Title); err != nil {
+		if err := rows.Scan(&session.ID, &session.Title); err != nil {
 			return nil, fmt.Errorf("扫描 sessions 失败: %w", err)
 		}
 		sessions = append(sessions, session)
@@ -60,12 +60,12 @@ func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 // UpdateSessionTitle 更新 sessions 标题
-func (s *Store) UpdateSessionTitle(ctx context.Context, sessionId int64, title string) error {
+func (s *Store) UpdateSessionTitle(ctx context.Context, sessionID int64, title string) error {
 	res, err := s.db.ExecContext(
 		ctx,
 		`UPDATE sessions SET title = ? WHERE id = ?;`,
 		title,
-		sessionId,
+		sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("更新 sessions 标题失败: %w", err)
@@ -75,26 +75,26 @@ func (s *Store) UpdateSessionTitle(ctx context.Context, sessionId int64, title s
 		return fmt.Errorf("检查 sessions 标题更新行数失败: %w", err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("会话 %d 不存在: %w", sessionId, sql.ErrNoRows)
+		return fmt.Errorf("会话 %d 不存在: %w", sessionID, sql.ErrNoRows)
 	}
 	return nil
 }
 
 // DeleteSession 在单事务中删除会话及其关联的 messages 和 api_calls
-func (s *Store) DeleteSession(ctx context.Context, sessionId int64) error {
+func (s *Store) DeleteSession(ctx context.Context, sessionID int64) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("开启删除会话事务失败: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_id = ?;`, sessionId); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_id = ?;`, sessionID); err != nil {
 		return fmt.Errorf("删除会话关联 messages 失败: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM api_calls WHERE session_id = ?;`, sessionId); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM api_calls WHERE session_id = ?;`, sessionID); err != nil {
 		return fmt.Errorf("删除会话关联 api_calls 失败: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?;`, sessionId)
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?;`, sessionID)
 	if err != nil {
 		return fmt.Errorf("删除 sessions 记录失败: %w", err)
 	}
@@ -103,7 +103,7 @@ func (s *Store) DeleteSession(ctx context.Context, sessionId int64) error {
 		return fmt.Errorf("检查 sessions 删除行数失败: %w", err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("会话 %d 不存在: %w", sessionId, sql.ErrNoRows)
+		return fmt.Errorf("会话 %d 不存在: %w", sessionID, sql.ErrNoRows)
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -8,7 +8,7 @@ import (
 )
 
 type ToolCall struct {
-	Id       string           `json:"id"`
+	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`
 }
@@ -30,8 +30,8 @@ func (b toolCallBuffer) merge(deltas []toolCallDelta) {
 	for _, delta := range deltas {
 		curCall := b[delta.Index]
 
-		if delta.Id != "" {
-			curCall.Id = delta.Id
+		if delta.ID != "" {
+			curCall.ID = delta.ID
 		}
 		if delta.Type != "" {
 			curCall.Type = delta.Type
@@ -59,22 +59,22 @@ func checkToolCalls(calls []ToolCall) error {
 		return fmt.Errorf("模型请求调用工具，但调用列表为空")
 	}
 
-	checkedIds := make(map[string]struct{}, len(calls))
+	checkedIDs := make(map[string]struct{}, len(calls))
 	for i, call := range calls {
-		if strings.TrimSpace(call.Id) == "" {
+		if strings.TrimSpace(call.ID) == "" {
 			return fmt.Errorf("第 %d 工具缺少ID", i+1)
 		}
-		if _, ok := checkedIds[call.Id]; ok {
-			return fmt.Errorf("工具ID %s 重复", call.Id)
+		if _, ok := checkedIDs[call.ID]; ok {
+			return fmt.Errorf("工具ID %s 重复", call.ID)
 		}
 
-		checkedIds[call.Id] = struct{}{}
+		checkedIDs[call.ID] = struct{}{}
 
 		if call.Type != "function" {
-			return fmt.Errorf("工具调用 %s 的类型无效：%q", call.Id, call.Type)
+			return fmt.Errorf("工具调用 %s 的类型无效：%q", call.ID, call.Type)
 		}
 		if strings.TrimSpace(call.Function.Name) == "" {
-			return fmt.Errorf("工具调用 %s 缺少函数名", call.Id)
+			return fmt.Errorf("工具调用 %s 缺少函数名", call.ID)
 		}
 	}
 

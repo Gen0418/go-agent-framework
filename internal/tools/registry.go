@@ -53,7 +53,7 @@ func (r *Registry) Definitions() []apis.Tool {
 func (r *Registry) Run(ctx context.Context, dir string, call apis.ToolCall, confirm ConfirmFunc) (string, error) {
 	args := strings.TrimSpace(call.Function.Args)
 	if !strings.HasPrefix(args, "{") || !json.Valid([]byte(args)) {
-		return fmt.Sprintf("工具调用 %s 的参数必须是 JSON 对象", call.Id), nil
+		return fmt.Sprintf("工具调用 %s 的参数必须是 JSON 对象", call.ID), nil
 	}
 
 	tool, ok := r.tools[call.Function.Name]

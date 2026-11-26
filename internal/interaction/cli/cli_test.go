@@ -11,7 +11,7 @@ import (
 	"go-agent-framework/internal/apis"
 )
 
-func TestConfirmOperateByUser(t *testing.T) {
+func TestConfirm(t *testing.T) {
 	for _, tc := range []struct {
 		name, input     string
 		approved, retry bool
@@ -26,8 +26,8 @@ func TestConfirmOperateByUser(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
 			const dir, command = "工作 目录", "cat 'test file'"
-			terminal := NewCli(strings.NewReader(tc.input), &out)
-			ok, err := terminal.ConfirmOperateByUser(t.Context(), dir, command)
+			terminal := New(strings.NewReader(tc.input), &out)
+			ok, err := terminal.Confirm(t.Context(), dir, command)
 			if ok != tc.approved || !errors.Is(err, tc.err) {
 				t.Fatalf("确认 = %v，错误 = %v", ok, err)
 			}
@@ -44,10 +44,10 @@ func TestPrintHistoryToolOutput(t *testing.T) {
 	const args = `{"command":"pwd"}`
 	for _, result := range []string{"/workspace", "/workspace\n"} {
 		var out bytes.Buffer
-		terminal := NewCli(strings.NewReader(""), &out)
+		terminal := New(strings.NewReader(""), &out)
 		terminal.PrintHistory(t.Context(), []apis.Message{
-			{Role: "assistant", ToolCalls: []apis.ToolCall{{Id: "a", Function: apis.ToolCallFunction{Name: "bash", Args: args}}}},
-			{Role: "tool", ToolCallId: "a", Content: result},
+			{Role: "assistant", ToolCalls: []apis.ToolCall{{ID: "a", Function: apis.ToolCallFunction{Name: "bash", Args: args}}}},
+			{Role: "tool", ToolCallID: "a", Content: result},
 		})
 
 		want := "\n[工具调用] bash " + args + "\n\x1b[36m[工具输出] \x1b[0m/workspace\n"
@@ -65,14 +65,14 @@ func TestSelectSession(t *testing.T) {
 		{" new ", 0}, {" 8 ", 8}, {"0", -1}, {"-2", -1}, {"abc", -1},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
-			terminal := NewCli(strings.NewReader(tc.input+"\n"), io.Discard)
+			terminal := New(strings.NewReader(tc.input+"\n"), io.Discard)
 			id, err := terminal.SelectSession(t.Context())
 			if id != tc.id || (tc.id >= 0 && err != nil) {
 				t.Fatalf("输入 %q 得到 ID %d，错误 %v，预期 ID %d", tc.input, id, err, tc.id)
 			}
 		})
 	}
-	terminal := NewCli(strings.NewReader(""), io.Discard)
+	terminal := New(strings.NewReader(""), io.Discard)
 	if _, err := terminal.SelectSession(t.Context()); !errors.Is(err, io.EOF) {
 		t.Fatalf("预期输入结束，收到 %v", err)
 	}
@@ -80,7 +80,7 @@ func TestSelectSession(t *testing.T) {
 
 func TestWriteOutputReasoningToContentNewline(t *testing.T) {
 	var out bytes.Buffer
-	terminal := NewCli(strings.NewReader(""), &out)
+	terminal := New(strings.NewReader(""), &out)
 
 	events := []agent.OutputEvent{
 		{Kind: agent.OutputReasoning, Text: "先想"},

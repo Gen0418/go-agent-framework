@@ -11,7 +11,7 @@ import (
 )
 
 // AppendMessage 追加一条消息并刷新所属会话的 updated_at
-func (s *Store) AppendMessage(ctx context.Context, sessionId int64, msg apis.Message) error {
+func (s *Store) AppendMessage(ctx context.Context, sessionID int64, msg apis.Message) error {
 	callsJSON := "[]"
 	if len(msg.ToolCalls) > 0 {
 		data, err := json.Marshal(msg.ToolCalls)
@@ -32,12 +32,12 @@ func (s *Store) AppendMessage(ctx context.Context, sessionId int64, msg apis.Mes
 		`INSERT INTO messages
 		(session_id, role, content, reasoning_content, tool_calls, tool_call_id)
 		VALUES (?, ?, ?, ?, ?, ?);`,
-		sessionId,
+		sessionID,
 		msg.Role,
 		msg.Content,
 		msg.ReasoningContent,
 		callsJSON,
-		msg.ToolCallId,
+		msg.ToolCallID,
 	); err != nil {
 		return fmt.Errorf("插入 messages 失败: %w", err)
 	}
@@ -47,7 +47,7 @@ func (s *Store) AppendMessage(ctx context.Context, sessionId int64, msg apis.Mes
 		`UPDATE sessions
 		SET updated_at = datetime('now')
 		WHERE id = ?;`,
-		sessionId,
+		sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("更新 sessions 时间失败: %w", err)
@@ -57,7 +57,7 @@ func (s *Store) AppendMessage(ctx context.Context, sessionId int64, msg apis.Mes
 		return fmt.Errorf("检查 sessions 更新行数失败: %w", err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("会话 %d 不存在: %w", sessionId, sql.ErrNoRows)
+		return fmt.Errorf("会话 %d 不存在: %w", sessionID, sql.ErrNoRows)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -67,10 +67,10 @@ func (s *Store) AppendMessage(ctx context.Context, sessionId int64, msg apis.Mes
 }
 
 // LoadHistory 校验会话存在并按消息顺序载入历史记录
-func (s *Store) LoadHistory(ctx context.Context, sessionId int64) ([]apis.Message, error) {
-	if _, err := s.QuerySession(ctx, sessionId); err != nil {
+func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Message, error) {
+	if _, err := s.QuerySession(ctx, sessionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("sessionId %d 不存在: %w", sessionId, err)
+			return nil, fmt.Errorf("会话 %d 不存在: %w", sessionID, err)
 		}
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (s *Store) LoadHistory(ctx context.Context, sessionId int64) ([]apis.Messag
 		FROM messages
 		WHERE session_id = ?
 		ORDER BY id;`,
-		sessionId,
+		sessionID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("查询 messages 失败: %w", err)
@@ -97,7 +97,7 @@ func (s *Store) LoadHistory(ctx context.Context, sessionId int64) ([]apis.Messag
 			&msg.Content,
 			&msg.ReasoningContent,
 			&rawCalls,
-			&msg.ToolCallId,
+			&msg.ToolCallID,
 		); err != nil {
 			return nil, fmt.Errorf("扫描 messages 失败: %w", err)
 		}

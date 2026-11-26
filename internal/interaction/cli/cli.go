@@ -17,20 +17,20 @@ const (
 	ansiReset     = "\x1b[0m"    // 恢复默认
 )
 
-type Cli struct {
+type CLI struct {
 	Scanner     *bufio.Scanner
 	out         io.Writer
 	inReasoning bool
 }
 
-func NewCli(in io.Reader, out io.Writer) *Cli {
-	return &Cli{
+func New(in io.Reader, out io.Writer) *CLI {
+	return &CLI{
 		Scanner: bufio.NewScanner(in),
 		out:     out,
 	}
 }
 
-func (c *Cli) ReadInput(ctx context.Context) (string, error) {
+func (c *CLI) ReadInput(ctx context.Context) (string, error) {
 	for c.Scanner.Scan() {
 		text := c.Scanner.Text()
 		if strings.TrimSpace(text) == "" {
@@ -45,7 +45,7 @@ func (c *Cli) ReadInput(ctx context.Context) (string, error) {
 	return "", io.EOF
 }
 
-func (c *Cli) WriteOutput(ctx context.Context, event agent.OutputEvent) error {
+func (c *CLI) WriteOutput(ctx context.Context, event agent.OutputEvent) error {
 	switch event.Kind {
 	case agent.OutputReasoning:
 		c.inReasoning = true
@@ -87,7 +87,7 @@ func (c *Cli) WriteOutput(ctx context.Context, event agent.OutputEvent) error {
 	}
 }
 
-func (c *Cli) ConfirmOperateByUser(ctx context.Context, dir, command string) (bool, error) {
+func (c *CLI) Confirm(ctx context.Context, dir, command string) (bool, error) {
 	_, err := fmt.Fprintf(c.out, "\n目标目录: %s\n命令: %s\n是否执行?[y/n]", dir, command)
 	if err != nil {
 		return false, err
@@ -113,13 +113,13 @@ func (c *Cli) ConfirmOperateByUser(ctx context.Context, dir, command string) (bo
 	return false, ctx.Err()
 }
 
-func (c *Cli) PrintHistory(ctx context.Context, msgs []apis.Message) {
+func (c *CLI) PrintHistory(ctx context.Context, msgs []apis.Message) {
 	for _, msg := range msgs {
 		if msg.Role == "tool" {
 			_ = c.WriteOutput(ctx, agent.OutputEvent{
 				Kind:       agent.OutputToolResult,
 				Text:       msg.Content,
-				ToolCallId: msg.ToolCallId,
+				ToolCallID: msg.ToolCallID,
 			})
 			continue
 		}

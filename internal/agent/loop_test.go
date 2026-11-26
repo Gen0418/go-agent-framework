@@ -30,7 +30,7 @@ type exchange struct {
 	stream   string
 }
 
-func newTestLoop(t *testing.T, exchanges ...exchange) (*AgentLoop, *apis.Client) {
+func newTestLoop(t *testing.T, exchanges ...exchange) (*Loop, *apis.Client) {
 	t.Helper()
 	pending := make(chan exchange, len(exchanges))
 	for _, step := range exchanges {
@@ -71,19 +71,19 @@ func newTestLoop(t *testing.T, exchanges ...exchange) (*AgentLoop, *apis.Client)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	loop := NewAgentLoop(store, nil)
+	loop := NewLoop(store, nil)
 	if err := loop.NewSession(t.Context(), "测试会话"); err != nil {
 		t.Fatal(err)
 	}
 	return loop, &apis.Client{Endpoint: server.URL}
 }
 
-func assertHistory(t *testing.T, loop *AgentLoop, want []apis.Message) {
+func assertHistory(t *testing.T, loop *Loop, want []apis.Message) {
 	t.Helper()
 	if !reflect.DeepEqual(loop.msgs, want) {
 		t.Errorf("内存历史 = %+v，预期 %+v", loop.msgs, want)
 	}
-	stored, err := loop.store.LoadHistory(t.Context(), loop.SessionId())
+	stored, err := loop.store.LoadHistory(t.Context(), loop.SessionID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +97,9 @@ func assertHistory(t *testing.T, loop *AgentLoop, want []apis.Message) {
 
 func TestRunTurnToolResultsAndNextTurn(t *testing.T) {
 	user := apis.Message{Role: "user", Content: "调用工具"}
-	call := apis.ToolCall{Id: "a", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"cat fixture.txt"}`}}
+	call := apis.ToolCall{ID: "a", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"cat fixture.txt"}`}}
 	secondCall := call
-	secondCall.Id = "b"
+	secondCall.ID = "b"
 	secondCall.Function.Args = `{"command":"> denied.txt"}`
 	request := apis.Message{Role: "assistant", ToolCalls: []apis.ToolCall{call, secondCall}}
 	const result = "文件内容"
@@ -121,8 +121,8 @@ func TestRunTurnToolResultsAndNextTurn(t *testing.T) {
 	}
 	history := []apis.Message{
 		user, request,
-		{Role: "tool", ToolCallId: "a", Content: result},
-		{Role: "tool", ToolCallId: "b", Content: "用户拒绝执行"},
+		{Role: "tool", ToolCallID: "a", Content: result},
+		{Role: "tool", ToolCallID: "b", Content: "用户拒绝执行"},
 		{Role: "assistant", ReasoningContent: "思考", Content: "答复"},
 		{Role: "user", Content: "继续"},
 		{Role: "assistant", ReasoningContent: "思考", Content: "答复"},
@@ -213,11 +213,11 @@ type rejectToolStore struct {
 	err error
 }
 
-func (s rejectToolStore) AppendMessage(ctx context.Context, sessionId int64, msg apis.Message) error {
+func (s rejectToolStore) AppendMessage(ctx context.Context, sessionID int64, msg apis.Message) error {
 	if msg.Role == "tool" {
 		return s.err
 	}
-	return s.Store.AppendMessage(ctx, sessionId, msg)
+	return s.Store.AppendMessage(ctx, sessionID, msg)
 }
 
 func TestRunTurnToolWriteFailure(t *testing.T) {
@@ -312,11 +312,11 @@ func TestNewSessionStartsSeparateHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	firstID := loop.SessionId()
+	firstID := loop.SessionID()
 	if err := loop.NewSession(t.Context(), "新会话"); err != nil {
 		t.Fatal(err)
 	}
-	if loop.SessionId() == firstID {
+	if loop.SessionID() == firstID {
 		t.Fatal("新会话复用了旧会话 ID")
 	}
 	if err := loop.RunTurn(t.Context(), TurnRequest{
@@ -354,8 +354,8 @@ func TestToolCallInvalidArguments(t *testing.T) {
 		{"空白命令", `{"command":"  "}`, "命令串为空"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			call := apis.ToolCall{Id: "a", Function: apis.ToolCallFunction{Name: "bash", Args: tc.args}}
-			result, err := new(AgentLoop).runToolCall(t.Context(), call, t.TempDir(), unexpectedConfirm(t))
+			call := apis.ToolCall{ID: "a", Function: apis.ToolCallFunction{Name: "bash", Args: tc.args}}
+			result, err := new(Loop).runToolCall(t.Context(), call, t.TempDir(), unexpectedConfirm(t))
 			if err != nil || !strings.Contains(result, tc.want) {
 				t.Fatalf("工具结果 = %q，错误 = %v", result, err)
 			}
@@ -365,7 +365,7 @@ func TestToolCallInvalidArguments(t *testing.T) {
 
 func TestToolCallCommandFailure(t *testing.T) {
 	call := apis.ToolCall{Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"echo diagnostic >&2; exit 7"}`}}
-	result, err := new(AgentLoop).runToolCall(t.Context(), call, t.TempDir(), func(context.Context, string, string) (bool, error) { return true, nil })
+	result, err := new(Loop).runToolCall(t.Context(), call, t.TempDir(), func(context.Context, string, string) (bool, error) { return true, nil })
 	if err != nil || !strings.Contains(result, "exit status 7") || !strings.Contains(result, "diagnostic") {
 		t.Fatalf("工具结果 = %q，错误 = %v", result, err)
 	}
@@ -379,13 +379,13 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			assistantCalls := apis.Message{
 				Role: "assistant",
 				ToolCalls: []apis.ToolCall{
-					{Id: "a", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"cat fixture.txt"}`}},
-					{Id: "b", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"> denied.txt"}`}},
+					{ID: "a", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"cat fixture.txt"}`}},
+					{ID: "b", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"> denied.txt"}`}},
 				},
 			}
 			canceledTools := []apis.Message{
-				{Role: "tool", ToolCallId: "a", Content: "已取消"},
-				{Role: "tool", ToolCallId: "b", Content: "已取消"},
+				{Role: "tool", ToolCallID: "a", Content: "已取消"},
+				{Role: "tool", ToolCallID: "b", Content: "已取消"},
 			}
 			historyAfterCancel := append([]apis.Message{user, assistantCalls}, canceledTools...)
 
@@ -424,8 +424,8 @@ func TestRunTurnConfirmInterrupted(t *testing.T) {
 			}
 
 			// 重新绑定会话并继续下一轮，确认持久化历史合法可续聊
-			reloaded := NewAgentLoop(loop.store, nil)
-			if err := reloaded.BindSession(t.Context(), loop.SessionId()); err != nil {
+			reloaded := NewLoop(loop.store, nil)
+			if err := reloaded.BindSession(t.Context(), loop.SessionID()); err != nil {
 				t.Fatal(err)
 			}
 			if err := reloaded.RunTurn(t.Context(), TurnRequest{
@@ -496,17 +496,17 @@ func TestRunTurnStreamCanceled(t *testing.T) {
 
 func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	ctx := t.Context()
-	call := apis.ToolCall{Id: "call-1", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"pwd"}`}}
+	call := apis.ToolCall{ID: "call-1", Type: "function", Function: apis.ToolCallFunction{Name: "bash", Args: `{"command":"pwd"}`}}
 	history := []apis.Message{
 		{Role: "user", Content: "查看目录"},
 		{Role: "assistant", ReasoningContent: "需要读取工作目录", ToolCalls: []apis.ToolCall{call}},
-		{Role: "tool", ToolCallId: call.Id, Content: "/workspace"},
+		{Role: "tool", ToolCallID: call.ID, Content: "/workspace"},
 		{Role: "assistant", Content: "目录是 /workspace"},
 	}
 	next := apis.Message{Role: "user", Content: "刚才的目录是什么？"}
 	request := append(history, next)
 	loop, client := newTestLoop(t, exchange{request, replyStream})
-	targetID := loop.SessionId()
+	targetID := loop.SessionID()
 	for _, msg := range history {
 		if err := loop.appendMessage(ctx, msg); err != nil {
 			t.Fatal(err)
@@ -516,7 +516,7 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	if err := loop.NewSession(ctx, "另一个会话"); err != nil {
 		t.Fatal(err)
 	}
-	otherID := loop.SessionId()
+	otherID := loop.SessionID()
 	if err := loop.appendMessage(ctx, apis.Message{Role: "user", Content: "独立的话题"}); err != nil {
 		t.Fatal(err)
 	}
@@ -528,8 +528,8 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 	if err := loop.BindSession(ctx, targetID); err != nil {
 		t.Fatal(err)
 	}
-	if loop.SessionId() != targetID {
-		t.Fatalf("绑定的会话 = %d，预期 %d", loop.SessionId(), targetID)
+	if loop.SessionID() != targetID {
+		t.Fatalf("绑定的会话 = %d，预期 %d", loop.SessionID(), targetID)
 	}
 	if err := loop.RunTurn(ctx, TurnRequest{
 		Input:   next.Content,
@@ -558,21 +558,21 @@ func TestBindSessionContinuesStoredConversation(t *testing.T) {
 
 type failingLoadStore struct {
 	Store
-	failId int64
+	failID int64
 	err    error
 }
 
-func (s failingLoadStore) LoadHistory(ctx context.Context, sessionId int64) ([]apis.Message, error) {
-	if sessionId == s.failId {
+func (s failingLoadStore) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Message, error) {
+	if sessionID == s.failID {
 		return nil, s.err
 	}
-	return s.Store.LoadHistory(ctx, sessionId)
+	return s.Store.LoadHistory(ctx, sessionID)
 }
 
 func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 	ctx := t.Context()
 	loop, _ := newTestLoop(t)
-	currentID := loop.SessionId()
+	currentID := loop.SessionID()
 	msg := apis.Message{Role: "user", Content: "保留这段历史"}
 	if err := loop.appendMessage(ctx, msg); err != nil {
 		t.Fatal(err)
@@ -584,7 +584,7 @@ func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 	}
 	loop.store = failingLoadStore{
 		Store:  loop.store,
-		failId: brokenID,
+		failID: brokenID,
 		err:    errors.New("历史记录损坏"),
 	}
 
@@ -599,8 +599,8 @@ func TestBindSessionFailureKeepsCurrentSession(t *testing.T) {
 			if err := loop.BindSession(ctx, tc.id); err == nil {
 				t.Fatal("预期绑定失败")
 			}
-			if loop.SessionId() != currentID {
-				t.Fatalf("绑定失败后会话 ID 变成了 %d", loop.SessionId())
+			if loop.SessionID() != currentID {
+				t.Fatalf("绑定失败后会话 ID 变成了 %d", loop.SessionID())
 			}
 			assertHistory(t, loop, []apis.Message{msg})
 		})
@@ -621,8 +621,8 @@ func TestBindEmptySession(t *testing.T) {
 	if err := loop.BindSession(ctx, emptyID); err != nil {
 		t.Fatal(err)
 	}
-	if loop.SessionId() != emptyID || len(loop.msgs) != 0 {
-		t.Fatalf("绑定空会话后 ID = %d，历史 = %+v", loop.SessionId(), loop.msgs)
+	if loop.SessionID() != emptyID || len(loop.msgs) != 0 {
+		t.Fatalf("绑定空会话后 ID = %d，历史 = %+v", loop.SessionID(), loop.msgs)
 	}
 }
 
@@ -664,7 +664,7 @@ func TestRunTurnPerTurnOptsAndClient(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	loop := NewAgentLoop(store, nil)
+	loop := NewLoop(store, nil)
 	if err := loop.NewSession(t.Context(), "单轮参数测试"); err != nil {
 		t.Fatal(err)
 	}
