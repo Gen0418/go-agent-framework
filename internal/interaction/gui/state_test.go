@@ -136,6 +136,31 @@ func TestSessionStateAppendStreamEvent(t *testing.T) {
 	}
 }
 
+func TestSessionStateSyncHistoryPreservesReasoningOpen(t *testing.T) {
+	s := &sessionState{
+		messages: []*chatMessage{
+			{Message: apis.Message{Role: "user", Content: "问题"}},
+			{Message: apis.Message{Role: "assistant", ReasoningContent: "思考", Content: "半截未落库"}, reasoningOpen: true},
+			{Message: apis.Message{Role: "assistant", Content: "残留脏消息"}},
+		},
+	}
+
+	s.syncHistory([]apis.Message{
+		{Role: "user", Content: "问题"},
+		{Role: "assistant", ReasoningContent: "思考", Content: "最终落库"},
+	})
+
+	if s.curReply != nil {
+		t.Fatal("syncHistory 后 curReply 应置空")
+	}
+	if len(s.messages) != 2 {
+		t.Fatalf("同步后消息数 = %d，预期 2", len(s.messages))
+	}
+	if s.messages[1].Content != "最终落库" || !s.messages[1].reasoningOpen {
+		t.Fatalf("同步后第 2 条消息 = %+v，预期保留 reasoningOpen=true 且内容对齐", s.messages[1])
+	}
+}
+
 func TestSessionStateResolveConfirm(t *testing.T) {
 	for _, allow := range []bool{true, false} {
 		req := &confirmToolCall{dir: "/tmp", command: "ls", reply: make(chan bool, 1)}

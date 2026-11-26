@@ -7,59 +7,11 @@ import (
 
 	"go-agent-framework/internal/agent"
 	"go-agent-framework/internal/apis"
-	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/storage"
-
-	"github.com/egoist/mygo"
 )
 
 type scrollKey int64
 type inputKey int64
-
-// GUI应用主体
-type app struct {
-	// 应用级依赖
-	ctx         context.Context
-	cancel      context.CancelFunc
-	store       *storage.Store
-	win         *mygo.Window
-	cfg         config.Config      // 应用级配置项(APIKey/Endpoint/DefaultModel)
-	cfgPath     string             // 本地配置文件路径
-	defaultOpts apis.StreamOptions // 默认会话设置(Thinking/ReasoningEffort/Tools)
-
-	// 会话级信息
-	sessions       sessionList
-	sessionStates  map[int64]*sessionState // sessionId -> sessionState
-	optsOpen       bool                    // 会话选项浮层是否展开
-	renameDialog   renameDialog            // 重命名弹框状态
-	deleteDialog   deleteDialog            // 删除确认弹框状态
-	settingsDialog settingsDialog          // 应用设置弹框状态
-
-	// 应用级错误
-	err error
-}
-
-func (a *app) sessionState(id int64) *sessionState {
-	if s, ok := a.sessionStates[id]; ok {
-		return s
-	}
-	opts := a.defaultOpts
-	opts.Tools = slices.Clone(opts.Tools) // 独立拷贝 Tools，避免跨会话共享切片
-	s := &sessionState{opts: opts}
-	a.sessionStates[id] = s
-	return s
-}
-
-func (a *app) selectedSessionState() (storage.Session, *sessionState, bool) {
-	if a.sessions.selectedId == 0 {
-		return storage.Session{Id: 0, Title: "新对话"}, a.sessionState(0), true
-	}
-	s, ok := a.sessions.selected()
-	if !ok {
-		return storage.Session{}, nil, false
-	}
-	return s, a.sessionState(s.Id), true
-}
 
 // 单会话状态
 type sessionState struct {
@@ -76,9 +28,9 @@ type sessionState struct {
 }
 
 // 按结构化事件追加流式输出
+// 工具结果非流式直接追加，并结束当前 assistant 缓冲
 func (s *sessionState) appendStreamEvent(event agent.OutputEvent) {
 	if event.Kind == agent.OutputToolResult { // 工具结果
-		// 工具调用非流式，直接追加
 		s.messages = append(s.messages, &chatMessage{
 			Message: apis.Message{
 				Role:       "tool",
@@ -109,6 +61,24 @@ func (s *sessionState) appendStreamEvent(event agent.OutputEvent) {
 	}
 }
 
+// 用持久化历史快照对齐界面消息列表
+// 保留对应位置同角色消息的思考块折叠状态，确保界面与数据库一致
+func (s *sessionState) syncHistory(msgs []apis.Message) {
+	next := make([]*chatMessage, len(msgs))
+	for i, msg := range msgs {
+		open := false
+		if i < len(s.messages) && s.messages[i].Role == msg.Role {
+			open = s.messages[i].reasoningOpen
+		}
+		next[i] = &chatMessage{
+			Message:       msg,
+			reasoningOpen: open,
+		}
+	}
+	s.messages = next
+	s.curReply = nil
+}
+
 func (s *sessionState) resolveConfirm(allow bool) {
 	if s.confirm == nil {
 		return
@@ -122,6 +92,7 @@ func (s *sessionState) resolveConfirm(allow bool) {
 }
 
 // 切换本会话是否启用工具
+// 重新开启时从默认工具列表拷贝恢复，避免共享切片
 func (s *sessionState) setToolsEnabled(enabled bool, defaults []apis.Tool) {
 	if !enabled {
 		s.opts.Tools = nil
@@ -136,27 +107,6 @@ type confirmToolCall struct {
 	dir     string
 	command string
 	reply   chan bool // 容量为1
-}
-
-type renameDialog struct {
-	open      bool
-	sessionId int64
-	title     string
-	err       error
-}
-
-type deleteDialog struct {
-	open      bool
-	sessionId int64
-	title     string
-	err       error
-}
-
-type settingsDialog struct {
-	open    bool
-	cfg     config.Config
-	showKey bool
-	err     error
 }
 
 // 全会话列表

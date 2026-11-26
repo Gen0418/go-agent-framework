@@ -2,11 +2,17 @@ package gui
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go-agent-framework/internal/apis"
 	"go-agent-framework/internal/config"
@@ -232,7 +238,7 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	// 打开侧边栏右侧菜单 -> 点击重命名 -> 弹出重命名框
 	tt.Click(menuLabel)
 	tt.Click("重命名")
-	if !a.renameDialog.open || !tt.HasText("重命名会话") {
+	if !a.renameDialog.visible || !tt.HasText("重命名会话") {
 		t.Fatalf("重命名弹框未打开，当前文本: %q", tt.Texts())
 	}
 
@@ -240,15 +246,15 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	a.renameDialog.title = "   "
 	tt.Frame()
 	tt.Click("保存")
-	if !a.renameDialog.open || !tt.HasText("会话标题不能为空") {
-		t.Fatalf("空标题保存应提示错误并保持打开，open=%v, err=%v", a.renameDialog.open, a.renameDialog.err)
+	if !a.renameDialog.visible || !tt.HasText("会话标题不能为空") {
+		t.Fatalf("空标题保存应提示错误并保持打开，visible=%v, err=%v", a.renameDialog.visible, a.renameDialog.err)
 	}
 
 	// 填入新标题并保存
 	a.renameDialog.title = "已改名会话"
 	tt.Frame()
 	tt.Click("保存")
-	if a.renameDialog.open {
+	if a.renameDialog.visible {
 		t.Fatal("保存成功后重命名弹框应关闭")
 	}
 	if a.sessions.list[0].Title != "已改名会话" {
@@ -258,19 +264,19 @@ func TestSidebarSessionMenuAndModals(t *testing.T) {
 	// 打开删除确认弹框 -> 先点取消不应删除
 	tt.Click(menuLabel)
 	tt.Click("删除")
-	if !a.deleteDialog.open || !tt.HasText("确定删除“已改名会话”吗？") {
+	if !a.deleteDialog.visible || !tt.HasText("确定删除“已改名会话”吗？") {
 		t.Fatalf("删除确认弹框未显示预期提示，当前文本: %q", tt.Texts())
 	}
 	tt.Click("取消")
-	if a.deleteDialog.open || len(a.sessions.list) != 2 {
-		t.Fatalf("取消删除后应关闭弹框且保留会话，open=%v, len=%d", a.deleteDialog.open, len(a.sessions.list))
+	if a.deleteDialog.visible || len(a.sessions.list) != 2 {
+		t.Fatalf("取消删除后应关闭弹框且保留会话，visible=%v, len=%d", a.deleteDialog.visible, len(a.sessions.list))
 	}
 
 	// 再次打开删除确认弹框 -> 确认删除 -> 删库并回退到会话1
 	tt.Click(menuLabel)
 	tt.Click("删除")
 	tt.Click("确认删除")
-	if a.deleteDialog.open {
+	if a.deleteDialog.visible {
 		t.Fatal("确认删除后弹框应关闭")
 	}
 	if len(a.sessions.list) != 1 || a.sessions.selectedId != id1 {
@@ -334,7 +340,7 @@ func TestSettingsModalAndSaveConfig(t *testing.T) {
 
 	// 点击侧边栏底部“设置”打开弹框，默认隐藏明文 Key
 	tt.Click("设置")
-	if !a.settingsDialog.open || a.settingsDialog.showKey || !tt.HasText("应用设置") {
+	if !a.settingsDialog.visible || a.settingsDialog.showKey || !tt.HasText("应用设置") {
 		t.Fatalf("设置弹框初始状态不符: %+v", a.settingsDialog)
 	}
 
@@ -342,7 +348,7 @@ func TestSettingsModalAndSaveConfig(t *testing.T) {
 	a.settingsDialog.cfg.Endpoint = "not-a-url"
 	tt.Frame()
 	tt.Click("保存")
-	if !a.settingsDialog.open || a.settingsDialog.err == nil {
+	if !a.settingsDialog.visible || a.settingsDialog.err == nil {
 		t.Fatalf("非法 Endpoint 应报错并保持打开: %+v", a.settingsDialog)
 	}
 	if a.cfg.Endpoint != "https://old.example.com/v1" {
@@ -357,7 +363,7 @@ func TestSettingsModalAndSaveConfig(t *testing.T) {
 	}
 	tt.Frame()
 	tt.Click("保存")
-	if a.settingsDialog.open || a.settingsDialog.err != nil {
+	if a.settingsDialog.visible || a.settingsDialog.err != nil {
 		t.Fatalf("保存成功后应关闭弹框并清错: %+v", a.settingsDialog)
 	}
 	if a.cfg.APIKey != "sk-new" || a.cfg.Endpoint != "https://new.example.com/v1" || a.cfg.DefaultModel != "deepseek-reasoner" {
@@ -376,5 +382,169 @@ func TestSettingsModalAndSaveConfig(t *testing.T) {
 	tt.Click("选项")
 	if !tt.HasText("模型: deepseek-reasoner") {
 		t.Fatalf("选项浮层未同步显示新模型，当前文本: %q", tt.Texts())
+	}
+}
+
+func TestSubmitBlocksWhenHistoryLoadFails(t *testing.T) {
+	store, err := storage.Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// 构造一个不存在的 sessionId，触发加载历史失败
+	const missingId int64 = 999
+	a := &app{
+		ctx:           t.Context(),
+		store:         store,
+		cfg:           config.Config{APIKey: "sk-test", Endpoint: "https://example.invalid", DefaultModel: "m"},
+		sessionStates: make(map[int64]*sessionState),
+	}
+	state := a.sessionState(missingId)
+	state.inputText = "不应该发出去"
+
+	a.submit(missingId, state.inputText)
+
+	if state.err == nil || !strings.Contains(state.err.Error(), "加载会话历史失败") {
+		t.Fatalf("历史未加载且重载失败时应报错，实际 err = %v", state.err)
+	}
+	if state.sessionRunning || len(state.messages) != 0 || state.inputText != "不应该发出去" {
+		t.Fatalf("拦截后不应变更会话状态: running=%v, msgs=%d, input=%q", state.sessionRunning, len(state.messages), state.inputText)
+	}
+}
+
+func TestMultiSessionConfirmSwitchAndPersistence(t *testing.T) {
+	// 构造 mock 模型服务：根据请求内容区分会话 A（工具调用）和会话 B（普通对话）
+	const (
+		doneEvent = "data: [DONE]\n\n"
+		stopEvent = "data: " + `{"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+		callEvent = "data: " + `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo ok\"}"}}]}}]}` + "\n\n" +
+			"data: " + `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n" + doneEvent
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []apis.Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == "user" && last.Content == "执行命令A":
+			io.WriteString(w, callEvent)
+		case last.Role == "tool":
+			io.WriteString(w, "data: "+`{"choices":[{"delta":{"content":"命令执行完成"}}]}`+"\n\n"+stopEvent+doneEvent)
+		default:
+			io.WriteString(w, "data: "+`{"choices":[{"delta":{"reasoning_content":"想一下B"}}]}`+"\n\n"+
+				"data: "+`{"choices":[{"delta":{"content":"回复B"}}]}`+"\n\n"+stopEvent+doneEvent)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	store, err := storage.Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	idA, err := store.CreateSession(t.Context(), "会话A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idB, err := store.CreateSession(t.Context(), "会话B")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟单线程 UI 事件循环，保证所有 updateUI 串行执行且与测试主线程同步
+	uiCh := make(chan func(), 64)
+	a := &app{
+		ctx:      t.Context(),
+		store:    store,
+		dispatch: func(fn func()) { uiCh <- fn },
+		cfg: config.Config{
+			APIKey:       "sk-test",
+			Endpoint:     srv.URL,
+			DefaultModel: "test-model",
+		},
+		sessions: sessionList{
+			list: []storage.Session{
+				{Id: idA, Title: "会话A"},
+				{Id: idB, Title: "会话B"},
+			},
+			selectedId: idA,
+		},
+		sessionStates: make(map[int64]*sessionState),
+	}
+
+	waitUntil := func(cond func() bool, desc string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for !cond() {
+			select {
+			case fn := <-uiCh:
+				fn()
+			case <-deadline:
+				t.Fatalf("等待超时: %s", desc)
+			}
+		}
+	}
+
+	// 1. 会话 A 发起工具调用并进入待确认状态
+	if err := a.selectSession(idA); err != nil {
+		t.Fatal(err)
+	}
+	stateA := a.sessionState(idA)
+	a.submit(idA, "执行命令A")
+	waitUntil(func() bool { return stateA.confirm != nil }, "会话 A 出现工具确认")
+
+	// 2. 切到会话 B 正常发消息并等待完成，期间会话 A 保持待确认状态
+	if err := a.selectSession(idB); err != nil {
+		t.Fatal(err)
+	}
+	stateB := a.sessionState(idB)
+	a.submit(idB, "你好B")
+	waitUntil(func() bool { return !stateB.sessionRunning }, "会话 B 完成生成")
+	if stateB.err != nil {
+		t.Fatalf("会话 B 出错: %v", stateB.err)
+	}
+	if stateA.confirm == nil || !stateA.sessionRunning {
+		t.Fatal("切到会话 B 后不应丢失会话 A 的待确认或运行状态")
+	}
+
+	// 3. 切回会话 A 批准执行并等待整轮完成
+	if err := a.selectSession(idA); err != nil {
+		t.Fatal(err)
+	}
+	stateA.resolveConfirm(true)
+	waitUntil(func() bool { return !stateA.sessionRunning }, "会话 A 完成工具调用与最终回复")
+	if stateA.err != nil {
+		t.Fatalf("会话 A 出错: %v", stateA.err)
+	}
+
+	// 4. 验证两个会话的实时界面消息与重启后从数据库重载的历史完全一致
+	for _, tc := range []struct {
+		name  string
+		id    int64
+		state *sessionState
+	}{
+		{"会话A", idA, stateA},
+		{"会话B", idB, stateB},
+	} {
+		reloaded, err := store.LoadHistory(t.Context(), tc.id)
+		if err != nil {
+			t.Fatalf("%s 重载历史失败: %v", tc.name, err)
+		}
+		got := make([]apis.Message, len(tc.state.messages))
+		for i, m := range tc.state.messages {
+			got[i] = m.Message
+		}
+		if !reflect.DeepEqual(got, reloaded) {
+			t.Fatalf("%s 界面消息与数据库历史不一致:\n界面=%+v\n库内=%+v", tc.name, got, reloaded)
+		}
 	}
 }
