@@ -2,25 +2,15 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"go-agent-framework/internal/apis"
 )
 
-const (
-	bashEnvPath        = "SAISON_BASH_PATH"
-	defaultBashTimeout = 60 * time.Second
-)
-
-type bashArgs struct {
-	Command string `json:"command"`
-}
+const bashEnvPath = "SAISON_BASH_PATH"
 
 // Bash 经用户确认后在指定目录执行 Bash 命令
 type Bash struct{}
@@ -48,41 +38,11 @@ func (Bash) Definition() apis.Tool {
 }
 
 func (Bash) Run(ctx context.Context, dir, rawArgs string, confirm ConfirmFunc) (string, error) {
-	var args bashArgs
-	decoder := json.NewDecoder(strings.NewReader(rawArgs))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&args); err != nil {
-		return fmt.Sprintf("bash 参数解析错误: %v", err), nil
-	}
-
-	if strings.TrimSpace(args.Command) == "" {
-		return "bash 命令串为空", nil
-	}
-
-	isConfirmed, err := confirm(ctx, dir, args.Command)
-	if err != nil {
-		return "", err
-	}
-	if !isConfirmed {
-		return "用户拒绝执行", nil
-	}
-
-	toolOutput, err := execBash(ctx, dir, args.Command)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return "", ctxErr
-	}
-	if err != nil {
-		if toolOutput == "" {
-			return fmt.Sprintf("bash 执行失败: %v", err), nil
-		}
-		return fmt.Sprintf("bash 执行失败: %v\n%s", err, toolOutput), nil
-	}
-
-	return toolOutput, nil
+	return runConfirmedCommand(ctx, "bash", dir, rawArgs, confirm, execBash)
 }
 
 func execBash(ctx context.Context, dir, command string) (string, error) {
-	return execBashWithTimeout(ctx, dir, command, defaultBashTimeout)
+	return execBashWithTimeout(ctx, dir, command, defaultCommandTimeout)
 }
 
 func execBashWithTimeout(ctx context.Context, dir, command string, timeout time.Duration) (string, error) {
@@ -90,21 +50,7 @@ func execBashWithTimeout(ctx context.Context, dir, command string, timeout time.
 	if err != nil {
 		return "", err
 	}
-
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(execCtx, bashPath, "-c", command)
-	cmd.Dir = dir
-	cmd.Stdin = nil
-	cmd.WaitDelay = 3 * time.Second
-	configureBashCmd(cmd)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil && ctx.Err() == nil && errors.Is(execCtx.Err(), context.DeadlineExceeded) {
-		return string(output), fmt.Errorf("命令执行超时（超过 %s）: %w", timeout, execCtx.Err())
-	}
-	return string(output), err
+	return runSubprocess(ctx, dir, timeout, bashPath, "-c", command)
 }
 
 func isRegularFile(path string) bool {

@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,19 +33,26 @@ func TestExecBashWorkingDirectory(t *testing.T) {
 func TestRegistryDefaultDefinitions(t *testing.T) {
 	reg := DefaultRegistry()
 	defs := reg.Definitions()
-	if len(defs) != 1 || defs[0].Function.Name != "bash" {
-		t.Fatalf("默认工具定义 = %+v，预期包含 bash", defs)
+	if runtime.GOOS == "windows" {
+		if !slices.ContainsFunc(defs, func(d apis.Tool) bool { return d.Function.Name == "powershell" }) {
+			t.Fatalf("Windows 默认工具定义 = %+v，预期包含 powershell", defs)
+		}
+	} else {
+		if len(defs) != 1 || defs[0].Function.Name != "bash" {
+			t.Fatalf("默认工具定义 = %+v，预期仅包含 bash", defs)
+		}
 	}
 
 	// 修改返回的切片不应污染注册表
+	orig := defs[0].Function.Name
 	defs[0].Function.Name = "mutated"
-	if reg.Definitions()[0].Function.Name != "bash" {
+	if reg.Definitions()[0].Function.Name != orig {
 		t.Fatal("修改 Definitions 返回切片污染了注册表")
 	}
 }
 
 func TestRegistryRunInvalidArguments(t *testing.T) {
-	reg := DefaultRegistry()
+	reg := NewRegistry(Bash{})
 	unexpectedConfirm := func(context.Context, string, string) (bool, error) {
 		t.Fatal("参数非法或未知工具时不应触发用户确认")
 		return false, nil
@@ -76,7 +85,7 @@ func TestRegistryRunInvalidArguments(t *testing.T) {
 }
 
 func TestBashRunConfirmAndExecution(t *testing.T) {
-	reg := DefaultRegistry()
+	reg := NewRegistry(Bash{})
 	call := apis.ToolCall{
 		ID:       "a",
 		Type:     "function",

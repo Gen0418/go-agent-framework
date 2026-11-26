@@ -9,7 +9,11 @@ import (
 	"strings"
 )
 
-func configureBashCmd(*exec.Cmd) {}
+func defaultTools() []Tool {
+	return []Tool{Bash{}}
+}
+
+func configureHiddenCmd(*exec.Cmd) {}
 
 func resolveBashPath() (string, error) {
 	if custom := strings.TrimSpace(os.Getenv(bashEnvPath)); custom != "" {
