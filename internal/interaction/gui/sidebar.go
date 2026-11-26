@@ -32,7 +32,7 @@ func renderSidebar(c *ui.Context, props sidebarProps) {
 
 	sidebarPanel(c, func() {
 		topBar(c, 12, func() {
-			ui.Column(c).Grow(1).Gap(1).Children(func() {
+			ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
 				ui.Text(c, "SAISON").FontSize(14).FontWeight(600).LetterSpacing(0.8).SingleLine()
 				ui.Text(c, "Ready to use, free to brew.").FontSize(11).Italic().TextColor(t.TextMuted).SingleLine()
 			})
@@ -81,9 +81,9 @@ func renderSidebarItem(c *ui.Context, item sidebarItem, props sidebarProps) {
 	}
 
 	row.Children(func() {
-		selectBtn := ui.ButtonBase(c).Grow(1).AlignItems(ui.Center).Gap(6).Padding(6, 0).Label(session.Title)
+		selectBtn := ui.ButtonBase(c).Grow(1).MinWidth(0).AlignItems(ui.Center).Gap(6).Padding(6, 0).Label(session.Title)
 		selectBtn.Children(func() {
-			title := ui.Text(c, session.Title).Grow(1).FontSize(13).SingleLine()
+			title := ui.Text(c, session.Title).Grow(1).MinWidth(0).FontSize(13).SingleLine()
 			if selected {
 				title.FontWeight(600).TextColor(t.Text)
 			} else {

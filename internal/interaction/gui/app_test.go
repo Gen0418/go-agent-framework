@@ -579,6 +579,13 @@ func TestComposerKeyboardAndConfirmCard(t *testing.T) {
 	}
 }
 
+func mustClick(t *testing.T, tt *ui.Tester, label string) {
+	t.Helper()
+	if err := tt.Click(label); err != nil {
+		t.Fatalf("点击 %q 失败（元素可能被遮挡或挤出视野）: %v", label, err)
+	}
+}
+
 func TestLongToolCallAndConfirmStayScrollableAndVisible(t *testing.T) {
 	lines := make([]string, 60)
 	for i := range lines {
@@ -625,20 +632,113 @@ func TestLongToolCallAndConfirmStayScrollableAndVisible(t *testing.T) {
 	}
 
 	// 展开消息中的长工具参数
-	tt.Click("切换工具参数展开")
+	mustClick(t, tt, "切换工具参数展开")
 	if !tt.HasText(`{"command":`) || !tt.HasText("收起") {
 		t.Fatalf("展开长工具参数后应显示参数与收起按钮，当前文本: %q", tt.Texts())
 	}
 
 	// 切换确认卡命令区的展开/收起，且“批准”按钮在最小窗口下依然可点
-	tt.Click("切换待确认命令展开")
+	mustClick(t, tt, "切换待确认命令展开")
 	if !confirm.expanded {
 		t.Fatal("点击展开后 confirm.expanded 应为 true")
 	}
-	tt.Click("批准")
+	mustClick(t, tt, "批准")
 	if allow := <-confirm.reply; !allow {
 		t.Fatal("长命令展开状态下点击批准应正常返回 true")
 	}
+}
+
+func TestOverflowProtectionForModalsErrorAndToolResult(t *testing.T) {
+	t.Run("超长错误横幅、展开长确认卡与超长标题在最小窗口下不挤出关键按钮，且长工具输出可折叠", func(t *testing.T) {
+		errLines := make([]string, 30)
+		for i := range errLines {
+			errLines[i] = fmt.Sprintf("error-detail-line-%02d", i+1)
+		}
+		cmdLines := make([]string, 40)
+		for i := range cmdLines {
+			cmdLines[i] = fmt.Sprintf("echo confirm-line-%02d", i+1)
+		}
+		outLines := make([]string, 30)
+		for i := range outLines {
+			outLines[i] = fmt.Sprintf("out-line-%02d", i+1)
+		}
+
+		confirm := &confirmToolCall{
+			dir:     strings.Repeat("C:/very_long_segment/", 8),
+			command: strings.Join(cmdLines, "\n"),
+			reply:   make(chan bool, 1),
+		}
+		a := &app{
+			cfg: config.Config{DefaultModel: "deepseek-chat"},
+			sessions: sessionList{
+				list:       []storage.Session{{ID: 1, Title: strings.Repeat("SuperLongSessionTitleWithoutSpaces", 3)}},
+				selectedID: 1,
+			},
+			sessionStates: map[int64]*sessionState{
+				1: {
+					historyLoaded: true,
+					running:       true,
+					err:           errors.New(strings.Join(errLines, "\n")),
+					confirm:       confirm,
+					messages: []*chatMessage{
+						{Message: apis.Message{Role: "tool", ToolCallID: "t1", Content: strings.Join(outLines, "\n")}},
+					},
+				},
+			},
+		}
+
+		tt := ui.NewTester(a.view, 680, 480)
+
+		// 即使 30 行错误横幅 + 40 行展开确认卡 + 超长路径同时出现，关键操作按钮依然都在视野内可点
+		mustClick(t, tt, "切换待确认命令展开")
+		if !confirm.expanded {
+			t.Fatal("点击展开后 confirm.expanded 应为 true")
+		}
+		mustClick(t, tt, "批准")
+		if allow := <-confirm.reply; !allow {
+			t.Fatal("错误横幅叠加展开长确认卡时批准按钮应保持可点")
+		}
+		mustClick(t, tt, "关闭错误提示")
+		if a.sessionState(1).err != nil {
+			t.Fatal("超长错误横幅应能正常关闭")
+		}
+
+		// 关闭横幅与确认卡后，验证长工具输出默认展开在滚动区，且支持手动收起/再展开
+		if !tt.HasText("共 30 行") || !tt.HasText("out-line-01") {
+			t.Fatalf("长工具输出默认应展示摘要与内容: %q", tt.Texts())
+		}
+		mustClick(t, tt, "切换工具输出展开")
+		if tt.HasText("out-line-01") {
+			t.Fatal("点击收起后应隐藏长工具输出正文")
+		}
+		mustClick(t, tt, "切换工具输出展开")
+		if !tt.HasText("out-line-01") {
+			t.Fatal("再次点击展开后应恢复长工具输出正文")
+		}
+
+		// 超长无空格会话标题不应把右侧菜单按钮挤出侧边栏
+		mustClick(t, tt, "更多操作 1")
+		if !tt.HasText("重命名") {
+			t.Fatalf("超长无空格会话标题不应把右侧菜单挤出视野: %q", tt.Texts())
+		}
+	})
+
+	t.Run("矮窗口下设置弹框叠加长报错仍可点击底部保存与取消", func(t *testing.T) {
+		longErr := errors.New(strings.Repeat("保存配置失败：磁盘写入权限不足或路径非法。\n", 15))
+		a := &app{
+			cfg:           config.Config{APIKey: "sk-1", Endpoint: "https://api.example.com", DefaultModel: "m"},
+			sessionStates: make(map[int64]*sessionState),
+		}
+		a.settingsDialog.open(a.cfg)
+		a.settingsDialog.err = longErr
+
+		// 在 680×480 最小窗口下，设置弹框带 15 行错误仍应保证底部取消按钮可见可点
+		tt := ui.NewTester(a.view, 680, 480)
+		mustClick(t, tt, "取消")
+		if a.settingsDialog.visible {
+			t.Fatal("矮窗口+长报错场景下取消按钮应保持可见并可关闭弹框")
+		}
+	})
 }
 
 func TestSubmitBlocksWhenHistoryLoadFails(t *testing.T) {

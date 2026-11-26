@@ -28,7 +28,7 @@ type chatProps struct {
 func renderChat(c *ui.Context, props chatProps) {
 	t := c.Theme()
 
-	ui.Column(c).Grow(1).FillHeight().Background(t.Background).Children(func() {
+	ui.Column(c).Grow(1).MinWidth(0).FillHeight().Background(t.Background).Children(func() {
 		renderChatHeader(c, props)
 
 		if props.err != nil {
@@ -58,7 +58,7 @@ func renderChatHeader(c *ui.Context, props chatProps) {
 		if props.sidebarCollapsed && iconButton(c, "»", "展开侧边栏").Clicked() && props.onExpandSidebar != nil {
 			props.onExpandSidebar()
 		}
-		ui.Text(c, props.title).FontSize(14).FontWeight(600).SingleLine().Grow(1)
+		ui.Text(c, props.title).FontSize(14).FontWeight(600).SingleLine().Grow(1).MinWidth(0)
 		if props.running {
 			statusSpinner(c, "生成中")
 		}
@@ -73,7 +73,7 @@ func renderChatHeader(c *ui.Context, props chatProps) {
 func renderMessageList(c *ui.Context, props chatProps) {
 	t := c.Theme()
 
-	ui.Box(c).Grow(1).FillWidth().Children(func() {
+	ui.Box(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
 		if len(props.messages) == 0 {
 			ui.Column(c).Fill().Children(func() {
 				ui.Column(c).Margin(ui.Auto).AlignItems(ui.Center).Gap(8).Padding(24).Children(func() {

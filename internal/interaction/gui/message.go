@@ -48,7 +48,13 @@ func renderMessage(c *ui.Context, msg *chatMessage, props messageProps) {
 			}
 		})
 	case "tool":
-		toolResultCard(c, strings.TrimRight(msg.Content, "\n"))
+		key := msg.ToolCallID
+		if key == "" {
+			key = "tool-result"
+		}
+		if toolResultCard(c, key, strings.TrimRight(msg.Content, "\n")) && props.onToggleFold != nil {
+			props.onToggleFold()
+		}
 	default:
 		ui.Text(c, msg.Content).FontSize(14).LineHeight(1.5).Selectable()
 	}

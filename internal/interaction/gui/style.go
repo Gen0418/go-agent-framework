@@ -15,8 +15,10 @@ const (
 	toolFoldMaxLines    = 5
 	toolFoldMaxRunes    = 240
 	toolScrollHeight    = 220
-	confirmCompactMaxH  = 100
-	confirmExpandedMaxH = 240
+	confirmCompactMaxH  = 96
+	confirmExpandedMaxH = 180
+	bannerMaxHeight     = 72
+	dialogErrorMaxH     = 80
 )
 
 // 应用极简黑白灰主题
@@ -172,7 +174,7 @@ func statusSpinner(c *ui.Context, label string) {
 }
 
 // 会话级错误横幅
-// 淡红底细边框容器，文本可选中复制，提供关闭按钮
+// 淡红底细边框容器，超长报错在限高区内部滚动，关闭按钮固定在右上角
 func dangerBanner(c *ui.Context, msg string, onDismiss func()) {
 	t := c.Theme()
 	ui.Box(c).Shrink(0).Padding(12, 20, 0, 20).Children(func() {
@@ -182,12 +184,14 @@ func dangerBanner(c *ui.Context, msg string, onDismiss func()) {
 			Margin(0, ui.Auto).
 			Padding(10, 14).
 			Gap(10).
-			AlignItems(ui.Center).
+			AlignItems(ui.Start).
 			Radius(t.Radius).
 			Background(t.Danger.Alpha(0.08)).
 			Border(1, t.Danger.Alpha(0.32)).
 			Children(func() {
-				ui.Text(c, msg).FontSize(13).TextColor(t.Danger).Grow(1).Selectable()
+				ui.Scroll(c).MaxHeight(bannerMaxHeight).Grow(1).MinWidth(0).Children(func() {
+					ui.Text(c, msg).FontSize(13).LineHeight(1.45).TextColor(t.Danger).Selectable()
+				})
 				if onDismiss != nil {
 					closeBtn := ui.ButtonBase(c).
 						Size(22, 22).
@@ -305,7 +309,7 @@ func toolCallCard(c *ui.Context, key any, name, args string) bool {
 	card.Children(func() {
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 			pill(c, "工具调用", t.TextMuted, t.Background)
-			ui.Text(c, name).Font("monospace").FontSize(12).FontWeight(600).SingleLine()
+			ui.Text(c, name).Font("monospace").FontSize(12).FontWeight(600).SingleLine().MinWidth(0)
 			if long {
 				ui.Spacer(c)
 				ui.Text(c, toolTextSummary(args)).FontSize(11).TextColor(t.TextMuted).SingleLine().Shrink(0)
@@ -343,25 +347,48 @@ func toolCallCard(c *ui.Context, key any, name, args string) bool {
 }
 
 // 工具输出卡片
-// 限制输出区最大高度并支持内部滚动与划词复制，避免长日志刷屏
-func toolResultCard(c *ui.Context, output string) {
+// 短输出直接展示；长输出默认在限高滚动区展示并支持手动收起/展开，返回本帧是否切换折叠态
+func toolResultCard(c *ui.Context, key any, output string) bool {
 	t := c.Theme()
-	ui.Column(c).
+	long := isLongToolText(output)
+	changed := false
+
+	card := ui.Column(c.Key(key)).
 		FillWidth().
 		Padding(8, 12).
 		Gap(6).
 		Radius(t.Radius).
 		Background(t.Surface).
-		Border(1, t.Border).
-		Children(func() {
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				pill(c, "工具输出", t.TextMuted, t.Background)
-			})
-			if output == "" {
-				ui.Text(c, "（无输出）").FontSize(12).TextColor(t.TextMuted)
-				return
+		Border(1, t.Border)
+	expanded := ui.Local(card, "expanded", func() bool { return true })
+
+	card.Children(func() {
+		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+			pill(c, "工具输出", t.TextMuted, t.Background)
+			if long {
+				ui.Spacer(c)
+				ui.Text(c, toolTextSummary(output)).FontSize(11).TextColor(t.TextMuted).SingleLine().Shrink(0)
+				if foldToggleButton(c, *expanded, "切换工具输出展开").Clicked() {
+					*expanded = !*expanded
+					changed = true
+				}
 			}
-			ui.Scroll(c).MaxHeight(220).FillWidth().Children(func() {
+		})
+		if output == "" {
+			ui.Text(c, "（无输出）").FontSize(12).TextColor(t.TextMuted)
+			return
+		}
+		if !long {
+			ui.Text(c, output).
+				Font("monospace").
+				FontSize(12).
+				LineHeight(1.45).
+				TabSize(4).
+				Selectable()
+			return
+		}
+		if *expanded {
+			ui.Scroll(c).MaxHeight(toolScrollHeight).FillWidth().Children(func() {
 				ui.Text(c, output).
 					Font("monospace").
 					FontSize(12).
@@ -369,7 +396,9 @@ func toolResultCard(c *ui.Context, output string) {
 					TabSize(4).
 					Selectable()
 			})
-		})
+		}
+	})
+	return changed
 }
 
 // 悬浮回到底部胶囊按钮
@@ -473,7 +502,7 @@ func confirmCard(c *ui.Context, confirm *confirmToolCall, onDecide func(allow bo
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Shrink(0).Children(func() {
 				pill(c, "等待确认", t.Warning, t.Warning.Alpha(0.16))
 				ui.Text(c, "请求执行本地命令").FontSize(13).FontWeight(600).Shrink(0)
-				ui.Text(c, confirm.dir).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1).TextAlign(ui.End)
+				ui.Text(c, confirm.dir).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1).MinWidth(0).TextAlign(ui.End)
 				if long {
 					ui.Text(c, toolTextSummary(confirm.command)).FontSize(11).TextColor(t.TextMuted).SingleLine().Shrink(0)
 					if foldToggleButton(c, confirm.expanded, "切换待确认命令展开").Clicked() {
@@ -509,22 +538,28 @@ func confirmCard(c *ui.Context, confirm *confirmToolCall, onDecide func(allow bo
 }
 
 // 统一样式模态弹框容器
-// 附带细边框、阴影与窄窗最大宽度保护，确保浅色和深色模式下轮廓都清晰
-func modalDialog(c *ui.Context, open *bool, width float32, title string, fn func()) {
+// 附带细边框、阴影与窄/矮窗最大尺寸保护；主体内容溢出时内部滚动，确保标题与操作按钮始终可见
+func modalDialog(c *ui.Context, open *bool, width float32, title string, body, actions func()) {
 	t := c.Theme()
 	ui.DialogBase(c, open, func(backdrop, panel ui.Element) {
 		backdrop.Background(ui.RGBA(0, 0, 0, 0.45))
 		panel.
 			Width(width).
 			MaxWidthPercent(90).
+			MaxHeightPercent(88).
 			Padding(20).
 			Gap(14).
 			Radius(12).
 			Background(t.Background).
 			Border(1, t.Border).
 			Shadow(0, 12, 32, 0, ui.RGBA(0, 0, 0, 0.32))
-		ui.Text(c, title).FontSize(16).FontWeight(600)
-		fn()
+		ui.Text(c, title).FontSize(16).FontWeight(600).Shrink(0)
+		ui.Scroll(c).Shrink(1).MinHeight(0).FillWidth().Children(func() {
+			ui.Column(c).FillWidth().Gap(14).Children(body)
+		})
+		if actions != nil {
+			dialogActions(c, actions)
+		}
 	})
 }
 
@@ -549,12 +584,14 @@ func dialogError(c *ui.Context, err error) {
 		Background(t.Danger.Alpha(0.08)).
 		Border(1, t.Danger.Alpha(0.3)).
 		Children(func() {
-			ui.Text(c, err.Error()).FontSize(12).TextColor(t.Danger).Selectable()
+			ui.Scroll(c).MaxHeight(dialogErrorMaxH).FillWidth().Children(func() {
+				ui.Text(c, err.Error()).FontSize(12).LineHeight(1.45).TextColor(t.Danger).Selectable()
+			})
 		})
 }
 
 func dialogActions(c *ui.Context, fn func()) {
-	ui.Row(c).FillWidth().Justify(ui.End).Gap(8).Padding(4, 0, 0, 0).Children(fn)
+	ui.Row(c).FillWidth().Shrink(0).Justify(ui.End).Gap(8).Padding(4, 0, 0, 0).Children(fn)
 }
 
 // 侧边栏会话菜单配置

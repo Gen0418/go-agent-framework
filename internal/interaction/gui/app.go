@@ -125,7 +125,7 @@ func (a *app) view(c *ui.Context) {
 func (a *app) renderActiveChat(c *ui.Context) {
 	curSession, curSessionState, ok := a.selectedSessionState()
 	if !ok {
-		ui.Column(c).Grow(1).FillHeight().Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).FillHeight().Children(func() {
 			ui.Text(c, "暂无会话").TextColor(c.Theme().TextMuted).Margin(ui.Auto)
 		})
 		return
