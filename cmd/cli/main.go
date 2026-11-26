@@ -14,6 +14,7 @@ import (
 	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/interaction/cli"
 	"go-agent-framework/internal/storage"
+	"go-agent-framework/internal/tools"
 )
 
 func main() {
@@ -25,26 +26,7 @@ func main() {
 	opts := apis.StreamOptions{
 		Thinking:        true,
 		ReasoningEffort: "low",
-		Tools: []apis.Tool{
-			{
-				Type: "function",
-				Function: apis.FunctionDef{
-					Name:        "bash",
-					Description: "经用户确认后，在当前工作目录执行 Bash 命令并返回输出。",
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"command": map[string]any{
-								"type":        "string",
-								"description": "要执行的完整 Bash 命令。",
-							},
-						},
-						"required":             []string{"command"},
-						"additionalProperties": false,
-					},
-				},
-			},
-		},
+		Tools:           tools.DefaultRegistry().Definitions(),
 	}
 	db, err := storage.Open(ctx, "agent.db") // 初始化数据库连接
 	if err != nil {

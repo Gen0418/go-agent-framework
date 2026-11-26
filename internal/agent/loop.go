@@ -22,6 +22,7 @@ type AgentLoop struct {
 	SessionId int64 // 绑定会话Id
 	cfg       config.Config
 	client    *apis.Client
+	tools     *tools.Registry
 	msgs      []apis.Message // 本会话的对话历史
 	db        *sql.DB
 	opts      apis.StreamOptions
@@ -39,13 +40,10 @@ const (
 	IsToolContent
 )
 
-type bashArgs struct {
-	Command string `json:"command"`
-}
-
 func NewAgentLoop(cfg config.Config, db *sql.DB, opts apis.StreamOptions) *AgentLoop {
 	l := &AgentLoop{
-		db: db,
+		db:    db,
+		tools: tools.DefaultRegistry(),
 	}
 	l.SetConfig(cfg)
 	l.SetOpts(opts)
@@ -223,46 +221,13 @@ func (l *AgentLoop) cancelRemainingToolCalls(ctx context.Context, calls []apis.T
 }
 
 // 执行工具调用
+// 返回字符串给模型处理，返回 error 表示执行异常
 func (l *AgentLoop) runToolCall(ctx context.Context, call apis.ToolCall, dir string, confirm ConfirmFunc) (string, error) {
-	args := strings.TrimSpace(call.Function.Args)
-	if !strings.HasPrefix(args, "{") || !json.Valid([]byte(args)) { // 合法性检查
-		return fmt.Sprintf("工具调用 %s 的参数必须是 JSON 对象", call.Id), nil
+	reg := l.tools
+	if reg == nil {
+		reg = tools.DefaultRegistry()
 	}
-
-	switch call.Function.Name {
-	case "bash":
-		bashArgs := bashArgs{}
-		decoder := json.NewDecoder(strings.NewReader(args))
-		decoder.DisallowUnknownFields()
-
-		if err := decoder.Decode(&bashArgs); err != nil { // Command 命令串
-			return fmt.Sprintf("bash 参数解析错误: %v", err), nil
-		}
-
-		if strings.TrimSpace(bashArgs.Command) == "" {
-			return "bash 命令串为空", nil
-		}
-
-		isConfirmed, err := confirm(ctx, dir, bashArgs.Command)
-		if err != nil {
-			return "", err
-		}
-		if !isConfirmed {
-			return "用户拒绝执行", nil
-		}
-
-		toolOutput, err := tools.ExecBash(ctx, dir, bashArgs.Command)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
-		}
-		if err != nil {
-			return fmt.Sprintf("bash 执行失败: %v\n%s", err, toolOutput), nil
-		}
-
-		return toolOutput, nil
-	default:
-		return "尚未实现", nil
-	}
+	return reg.Run(ctx, dir, call, tools.ConfirmFunc(confirm))
 }
 
 // 读取输入
