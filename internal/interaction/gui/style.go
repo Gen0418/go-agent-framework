@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"go-agent-framework/internal/apis"
+
 	"github.com/egoist/mygo/ui"
 )
 
@@ -177,7 +179,7 @@ func statusSpinner(c *ui.Context, label string) {
 // 淡红底细边框容器，超长报错在限高区内部滚动，关闭按钮固定在右上角
 func dangerBanner(c *ui.Context, msg string, onDismiss func()) {
 	t := c.Theme()
-	ui.Box(c).Shrink(0).Padding(12, 20, 0, 20).Children(func() {
+	ui.Box(c.Key("banner")).Shrink(0).Padding(12, 20, 0, 20).Children(func() {
 		ui.Row(c).
 			FillWidth().
 			MaxWidth(chatMaxWidth).
@@ -214,20 +216,114 @@ func dangerBanner(c *ui.Context, msg string, onDismiss func()) {
 }
 
 // 用户消息右对齐气泡
-// 限制最大宽度、圆角次级底色且支持划词复制
-func userBubble(c *ui.Context, text string) {
+// 支持纯文本、纯图片及图文混排，缩略图点击可打开系统预览，文字支持划词复制
+func userBubble(c *ui.Context, text string, images []apis.Image, thumbFn func(apis.Image) *ui.Bitmap, onOpenImage func(apis.Image)) {
 	t := c.Theme()
 	ui.Row(c).FillWidth().Children(func() {
 		ui.Spacer(c)
-		ui.Text(c, text).
-			Selectable().
-			FontSize(14).
-			LineHeight(1.5).
-			Padding(10, 14).
-			Radius(16).
-			Background(t.Surface).
-			MaxWidthPercent(78).
-			MaxWidth(540)
+		ui.Column(c).AlignItems(ui.End).Gap(6).MaxWidthPercent(78).MaxWidth(540).Children(func() {
+			if len(images) > 0 {
+				ui.Row(c).Wrap().Justify(ui.End).Gap(6).Children(func() {
+					for i, img := range images {
+						renderHistoryImageThumb(c, i, img, thumbFn, onOpenImage)
+					}
+				})
+			}
+			if text != "" {
+				ui.Text(c, text).
+					Selectable().
+					FontSize(14).
+					LineHeight(1.5).
+					Padding(10, 14).
+					Radius(16).
+					Background(t.Surface)
+			}
+		})
+	})
+}
+
+func renderHistoryImageThumb(c *ui.Context, idx int, img apis.Image, thumbFn func(apis.Image) *ui.Bitmap, onOpenImage func(apis.Image)) {
+	t := c.Theme()
+	name := strings.TrimSpace(img.Name)
+	if name == "" {
+		name = fmt.Sprintf("图片 %d", idx+1)
+	}
+	var bmp *ui.Bitmap
+	if thumbFn != nil {
+		bmp = thumbFn(img)
+	}
+
+	tile := ui.ButtonBase(c.Key(fmt.Sprintf("%d:%s", idx, img.Path))).
+		Size(120, 120).
+		Radius(12).
+		Background(t.Surface).
+		Border(1, t.Border).
+		Label("查看图片 " + name).
+		Tooltip(name)
+	if tile.Hovered() {
+		tile.Border(1, t.Text.Alpha(0.35))
+	}
+	tile.Children(func() {
+		if bmp != nil {
+			ui.Image(c, bmp).Fill().Fit(ui.Cover).Radius(11)
+			return
+		}
+		ui.Column(c).Fill().Center().Padding(8).Gap(4).Children(func() {
+			ui.Text(c, "图片不可用").FontSize(11).TextColor(t.TextMuted).SingleLine()
+			ui.Text(c, name).FontSize(11).TextColor(t.TextMuted).MaxLines(2).TextAlign(ui.Center)
+		})
+	})
+	if tile.Clicked() && onOpenImage != nil {
+		onOpenImage(img)
+	}
+}
+
+// 输入区待发送图片缩略图预览条
+// 多图时自动换行并限制最大高度，支持点击右上角 × 移除单张附件
+func pendingImageStrip(c *ui.Context, images []pendingImage, thumbFn func(pendingImage) *ui.Bitmap, onRemove func(id int64)) {
+	t := c.Theme()
+	ui.Scroll(c).MaxHeight(136).FillWidth().Children(func() {
+		ui.Row(c).FillWidth().Wrap().Gap(8).Children(func() {
+			for _, img := range images {
+				var bmp *ui.Bitmap
+				if thumbFn != nil {
+					bmp = thumbFn(img)
+				}
+				ui.Box(c.Key(img.id)).
+					Size(64, 64).
+					Radius(8).
+					Background(t.Background).
+					Border(1, t.Border).
+					Children(func() {
+						if bmp != nil {
+							ui.Image(c, bmp).Fill().Fit(ui.Cover).Radius(7).Label(img.name)
+						} else {
+							ui.Column(c).Fill().Center().Padding(4).Children(func() {
+								ui.Text(c, img.name).FontSize(10).TextColor(t.TextMuted).MaxLines(2).TextAlign(ui.Center)
+							})
+						}
+						rm := ui.ButtonBase(c).
+							Attach(ui.AnchorTopEnd, ui.AnchorTopEnd).
+							Top(2).
+							End(2).
+							Size(18, 18).
+							Center().
+							Radius(999).
+							Background(ui.RGBA(0, 0, 0, 0.62)).
+							Label("移除图片 " + img.name).
+							Tooltip("移除 " + img.name)
+						if rm.Hovered() {
+							rm.Background(t.Danger)
+						}
+						rm.Children(func() {
+							ui.Text(c, "×").FontSize(11).TextColor(ui.Hex("#ffffff"))
+						})
+						if rm.Clicked() && onRemove != nil {
+							onRemove(img.id)
+						}
+					})
+			}
+		})
 	})
 }
 
@@ -424,8 +520,8 @@ func scrollToEndButton(c *ui.Context) ui.Element {
 }
 
 // 底部一体化输入卡片容器
-// 子输入框获焦时加重边框提示，提供现代桌面聊天的输入区层次
-func composerCard(c *ui.Context, fn func()) {
+// 子输入框获焦或文件拖经时加重边框提示，提供现代桌面聊天的输入区层次
+func composerCard(c *ui.Context, dragOver bool, fn func()) {
 	t := c.Theme()
 	box := ui.Column(c).
 		FillWidth().
@@ -434,7 +530,10 @@ func composerCard(c *ui.Context, fn func()) {
 		Radius(14).
 		Background(t.Surface).
 		Border(1, t.Border)
-	if box.FocusWithin() {
+	switch {
+	case dragOver:
+		box.Border(2, t.Accent)
+	case box.FocusWithin():
 		box.Border(1, t.Text.Alpha(0.32))
 	}
 	box.Children(fn)

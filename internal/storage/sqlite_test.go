@@ -1,10 +1,16 @@
 package storage
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go-agent-framework/internal/apis"
@@ -17,8 +23,8 @@ func TestOpenInitializesSchema(t *testing.T) {
 	if err := store.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
-		t.Fatalf("数据库版本 = %d，预期为 1", version)
+	if version != latestVersion {
+		t.Fatalf("数据库版本 = %d，预期为 %d", version, latestVersion)
 	}
 
 	objects := []struct {
@@ -332,6 +338,161 @@ func TestDeleteSession(t *testing.T) {
 	// 重复删除或不存在的会话返回 sql.ErrNoRows
 	if err := store.DeleteSession(t.Context(), targetID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("重复删除返回错误 = %v，预期包装 sql.ErrNoRows", err)
+	}
+}
+
+func makeTestPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 120, G: 200, B: 80, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestOpenMigratesV1ToV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-v1.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 手工构造旧版 v1 表结构与既有数据（不含 messages.images 列）
+	for _, stmt := range rawV1 {
+		if _, err := db.ExecContext(t.Context(), stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(t.Context(), "PRAGMA user_version = 1;"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.ExecContext(t.Context(), `INSERT INTO sessions (title) VALUES ('旧版会话')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		`INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '升级前消息')`, sid,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openTestStore(t, path)
+	var version int
+	if err := store.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != latestVersion {
+		t.Fatalf("迁移后版本 = %d，预期 %d", version, latestVersion)
+	}
+	assertHistory(t, store, sid, []apis.Message{{Role: "user", Content: "升级前消息"}})
+
+	// 升级后的旧会话可以正常附加图片并重新读取
+	img, err := store.SaveImage(t.Context(), sid, "after.png", makeTestPNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextMsg := apis.Message{Role: "user", Content: "升级后带图", Images: []apis.Image{img}}
+	if err := store.AppendMessage(t.Context(), sid, nextMsg); err != nil {
+		t.Fatal(err)
+	}
+	assertHistory(t, store, sid, []apis.Message{
+		{Role: "user", Content: "升级前消息"},
+		nextMsg,
+	})
+}
+
+func TestSaveLoadAndDeleteSessionImages(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agent.db")
+	store := openTestStore(t, dbPath)
+
+	sid1 := createTestSession(t, store, "带图会话1")
+	sid2 := createTestSession(t, store, "带图会话2")
+	pngBytes := makeTestPNG(t)
+
+	// 非法格式、空内容与不存在会话均应被拦截
+	if _, err := store.SaveImage(t.Context(), sid1, "fake.png", []byte("plain text")); err == nil {
+		t.Fatal("伪造的非图片数据应被拒绝")
+	}
+	if _, err := store.SaveImage(t.Context(), sid1, "empty.png", nil); err == nil {
+		t.Fatal("空图片数据应被拒绝")
+	}
+	if _, err := store.SaveImage(t.Context(), 9999, "shot.png", pngBytes); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("不存在会话保存图片返回 = %v，预期包装 sql.ErrNoRows", err)
+	}
+
+	img1, err := store.SaveImage(t.Context(), sid1, `C:\Users\demo\截图.png`, pngBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img2, err := store.SaveImage(t.Context(), sid2, "keep.png", pngBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantPrefix := filepath.Join(dir, "attachments", "pic", "1") + string(filepath.Separator)
+	if !strings.HasPrefix(img1.Path, wantPrefix) || img1.MIME != "image/png" || img1.Name != "截图.png" || img1.Size != int64(len(pngBytes)) {
+		t.Fatalf("SaveImage 返回元数据异常: %+v", img1)
+	}
+	if saved, err := os.ReadFile(img1.Path); err != nil || !bytes.Equal(saved, pngBytes) {
+		t.Fatalf("磁盘图片内容与原始数据不一致: err=%v", err)
+	}
+
+	msg1 := apis.Message{Role: "user", Content: "请分析截图", Images: []apis.Image{img1}}
+	msg2 := apis.Message{Role: "user", Content: "保留图", Images: []apis.Image{img2}}
+	if err := store.AppendMessage(t.Context(), sid1, msg1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendMessage(t.Context(), sid2, msg2); err != nil {
+		t.Fatal(err)
+	}
+
+	// 验证数据库内实际存储的是可移植的相对路径（attachments/pic/...）
+	var rawImages string
+	if err := store.db.QueryRowContext(t.Context(), `SELECT images FROM messages WHERE session_id = ?`, sid1).Scan(&rawImages); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rawImages, `"attachments/pic/1/`) || strings.Contains(rawImages, dir) {
+		t.Fatalf("库内应存储相对路径，实际 images = %s", rawImages)
+	}
+
+	// 重开数据库后 LoadHistory 能自动解析回可用路径并与写入前完全一致
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openTestStore(t, dbPath)
+	assertHistory(t, reopened, sid1, []apis.Message{msg1})
+	assertHistory(t, reopened, sid2, []apis.Message{msg2})
+
+	// 删除会话 1 时应联动清理 attachments/pic/1 目录，不影响会话 2
+	if err := reopened.DeleteSession(t.Context(), sid1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "attachments", "pic", "1")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("删除会话 1 后附件目录仍存在: err=%v", err)
+	}
+	if _, err := os.Stat(img2.Path); err != nil {
+		t.Fatalf("删除会话 1 不应影响会话 2 附件: err=%v", err)
+	}
+
+	// images JSON 损坏时应返回错误
+	brokenID := createTestSession(t, reopened, "损坏图片记录")
+	if _, err := reopened.db.ExecContext(t.Context(),
+		`INSERT INTO messages (session_id, role, images) VALUES (?, 'user', '[')`, brokenID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.LoadHistory(t.Context(), brokenID); err == nil {
+		t.Fatal("损坏的 images JSON 应返回错误")
 	}
 }
 

@@ -3,22 +3,26 @@ package gui
 import (
 	"strings"
 
+	"go-agent-framework/internal/apis"
+
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 )
 
 type messageProps struct {
-	streaming    bool
-	md           *markdown.Options
-	onToggleFold func()
+	streaming     bool
+	md            *markdown.Options
+	onToggleFold  func()
+	thumbForImage func(apis.Image) *ui.Bitmap
+	onOpenImage   func(apis.Image)
 }
 
 // 单条消息组件
-// 按角色渲染用户气泡、可折叠思考卡片、流式/静态 Markdown 正文与等宽工具卡片
+// 按角色渲染用户气泡（含图片附件）、可折叠思考卡片、流式/静态 Markdown 正文与等宽工具卡片
 func renderMessage(c *ui.Context, msg *chatMessage, props messageProps) {
 	switch msg.Role {
 	case "user":
-		userBubble(c, msg.Content)
+		userBubble(c, msg.Content, msg.Images, props.thumbForImage, props.onOpenImage)
 	case "assistant":
 		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			if msg.ReasoningContent != "" {

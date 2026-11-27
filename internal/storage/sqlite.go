@@ -3,14 +3,22 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
-// Store 封装 SQLite 数据库句柄，对外隐藏底层 *sql.DB 与序列化细节
+// Store 封装 SQLite 数据库句柄与同级附件目录，对外隐藏底层 *sql.DB 与序列化细节
 type Store struct {
-	db *sql.DB
+	db          *sql.DB
+	attachMu    sync.Mutex
+	baseDir     string
+	tempBaseDir bool
 }
 
 // Open 打开并按版本迁移 SQLite 数据库
@@ -35,15 +43,42 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("数据库 %s 同步版本异常: %w", path, err)
 	}
 
-	return &Store{db: db}, nil
+	baseDir := ""
+	if !isMemoryDBPath(path) {
+		baseDir = filepath.Dir(path)
+	}
+	return &Store{db: db, baseDir: baseDir}, nil
 }
 
-// Close 关闭底层数据库连接
+func isMemoryDBPath(path string) bool {
+	trimmed := strings.TrimSpace(path)
+	return trimmed == "" || trimmed == ":memory:" || strings.HasPrefix(trimmed, "file::memory:")
+}
+
+// Close 关闭底层数据库连接并清理内存模式临时附件目录
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	var closeErr error
+	if s.db != nil {
+		closeErr = s.db.Close()
+	}
+	s.attachMu.Lock()
+	tempDir := ""
+	if s.tempBaseDir && s.baseDir != "" {
+		tempDir = s.baseDir
+		s.baseDir = ""
+		s.tempBaseDir = false
+	}
+	s.attachMu.Unlock()
+
+	if tempDir != "" {
+		if err := os.RemoveAll(tempDir); err != nil {
+			return errors.Join(closeErr, err)
+		}
+	}
+	return closeErr
 }
 
 // 根据 schemas 中的 ddl 自动初始化并迁移表结构

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -28,6 +30,7 @@ type app struct {
 	store       *storage.Store
 	win         *mygo.Window
 	dispatch    func(fn func())    // 可选 UI 线程调度器，为空时默认走 a.win.Update
+	httpClient  *http.Client       // 可选自定义 HTTP 客户端（为空时复用 apis 默认连接池）
 	cfg         config.Config      // 应用级配置项(APIKey/Endpoint/DefaultModel)
 	cfgPath     string             // 本地配置文件路径
 	defaultOpts apis.StreamOptions // 默认会话设置(Thinking/ReasoningEffort/Tools)
@@ -40,12 +43,16 @@ type app struct {
 	sessions         sessionList
 	sessionStates    map[int64]*sessionState // sessionID -> sessionState
 	chatLists        map[int64]*ui.ListState // sessionID -> 消息列表滚动状态（与纯状态解耦）
-	md               markdown.Options        // Markdown 渲染选项（所有会话共享，默认按词淡入）
-	sidebarCollapsed bool                    // 侧边栏是否收起（零值默认展开）
-	optsPopover      optsPopover             // 会话选项浮层组件
-	renameDialog     renameDialog            // 重命名弹框状态
-	deleteDialog     deleteDialog            // 删除确认弹框状态
-	settingsDialog   settingsDialog          // 应用设置弹框状态
+	thumbs           imageCache              // 缩略图位图缓存（避免每帧重复读盘解码）
+	nextImageID      int64                   // 草稿图片自增编号
+	pickImages       func(cb func([]string, error))
+	openPath         func(path string) error
+	md               markdown.Options // Markdown 渲染选项（所有会话共享，默认按词淡入）
+	sidebarCollapsed bool             // 侧边栏是否收起（零值默认展开）
+	optsPopover      optsPopover      // 会话选项浮层组件
+	renameDialog     renameDialog     // 重命名弹框状态
+	deleteDialog     deleteDialog     // 删除确认弹框状态
+	settingsDialog   settingsDialog   // 应用设置弹框状态
 
 	// 应用级错误
 	err error
@@ -56,6 +63,7 @@ func (a *app) syncClient() {
 		Endpoint: a.cfg.Endpoint,
 		APIKey:   a.cfg.APIKey,
 		Model:    a.cfg.DefaultModel,
+		HTTP:     a.httpClient,
 	})
 }
 
@@ -189,15 +197,36 @@ func (a *app) renderActiveChat(c *ui.Context) {
 		onDismissErr: func() {
 			curSessionState.err = nil
 		},
-		messages:  curSessionState.messages,
-		curReply:  curSessionState.curReply,
-		listState: a.chatList(curSession.ID),
-		md:        &a.md,
+		messages:      curSessionState.messages,
+		curReply:      curSessionState.curReply,
+		listState:     a.chatList(curSession.ID),
+		md:            &a.md,
+		thumbForImage: a.thumbs.getFile,
+		onOpenImage: func(img apis.Image) {
+			a.openImagePreview(curSession.ID, img)
+		},
+		onDropFiles: func(paths []string) {
+			a.attachImageFiles(curSession.ID, paths)
+		},
 		confirm:   curSessionState.confirm,
 		onConfirm: curSessionState.resolveConfirm,
 		composer: composerProps{
-			sessionID:     curSession.ID,
-			inputText:     &curSessionState.inputText,
+			sessionID:       curSession.ID,
+			inputText:       &curSessionState.inputText,
+			pendingImages:   curSessionState.pendingImages,
+			thumbForPending: a.thumbs.getPending,
+			onPickImages: func() {
+				a.openImagePicker(curSession.ID)
+			},
+			onDropFiles: func(paths []string) {
+				a.attachImageFiles(curSession.ID, paths)
+			},
+			onPasteImage: func(data []byte) {
+				a.attachImageBytes(curSession.ID, "粘贴图片.png", data)
+			},
+			onRemoveImage: func(id int64) {
+				a.removePendingImage(curSession.ID, id)
+			},
 			model:         a.cfg.DefaultModel,
 			opts:          &curSessionState.opts,
 			hasLocalTools: len(a.localTools) > 0,
@@ -225,10 +254,125 @@ func (a *app) renderActiveChat(c *ui.Context) {
 	})
 }
 
+func (a *app) openImagePicker(sessionID int64) {
+	deliver := func(paths []string, err error) {
+		if err != nil {
+			a.sessionState(sessionID).err = fmt.Errorf("选择图片失败: %w", err)
+			return
+		}
+		if len(paths) > 0 {
+			a.attachImageFiles(sessionID, paths)
+		}
+	}
+	if a.pickImages != nil {
+		a.pickImages(deliver)
+		return
+	}
+	win := a.win
+	go func() {
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+			Parent:   win,
+			Title:    "选择图片",
+			Filters:  []mygo.FileFilter{{Name: "图片", Extensions: []string{"png", "jpg", "jpeg", "gif", "webp"}}},
+			Multiple: true,
+		})
+		a.updateUI(func() {
+			deliver(paths, err)
+		})
+	}()
+}
+
+func (a *app) openImagePreview(sessionID int64, img apis.Image) {
+	path := strings.TrimSpace(img.Path)
+	if path == "" {
+		return
+	}
+	if a.openPath != nil {
+		if err := a.openPath(path); err != nil {
+			a.sessionState(sessionID).err = fmt.Errorf("打开图片失败: %w", err)
+		}
+		return
+	}
+	go func() {
+		if err := mygo.Shell.OpenPath(path); err != nil {
+			a.updateUI(func() {
+				a.sessionState(sessionID).err = fmt.Errorf("打开图片失败: %w", err)
+			})
+		}
+	}()
+}
+
+func (a *app) attachImageFiles(sessionID int64, paths []string) {
+	state := a.sessionState(sessionID)
+	if state.running {
+		return
+	}
+	var errs []string
+	added := false
+	for _, p := range paths {
+		name, mime, data, err := loadImageFile(p)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		if state.pendingImageBytes()+int64(len(data)) > maxDraftImageTotalBytes {
+			errs = append(errs, fmt.Sprintf("图片总大小超过单条消息上限（%d MiB）", maxDraftImageTotalBytes>>20))
+			break
+		}
+		a.nextImageID++
+		state.addPendingImage(pendingImage{
+			id:   a.nextImageID,
+			name: name,
+			mime: mime,
+			data: data,
+		})
+		added = true
+	}
+	if len(errs) > 0 {
+		state.err = errors.New(strings.Join(errs, "；"))
+	} else if added {
+		state.err = nil
+	}
+}
+
+func (a *app) attachImageBytes(sessionID int64, name string, data []byte) {
+	state := a.sessionState(sessionID)
+	if state.running {
+		return
+	}
+	mime, err := validateImageBytes(name, data)
+	if err != nil {
+		state.err = err
+		return
+	}
+	if state.pendingImageBytes()+int64(len(data)) > maxDraftImageTotalBytes {
+		state.err = fmt.Errorf("图片总大小超过单条消息上限（%d MiB）", maxDraftImageTotalBytes>>20)
+		return
+	}
+	a.nextImageID++
+	state.addPendingImage(pendingImage{
+		id:   a.nextImageID,
+		name: name,
+		mime: mime,
+		data: slices.Clone(data),
+	})
+	state.err = nil
+}
+
+func (a *app) removePendingImage(sessionID, imageID int64) {
+	state := a.sessionState(sessionID)
+	if state.removePendingImage(imageID) {
+		a.thumbs.evict(pendingThumbKey(imageID))
+	}
+}
+
 // 首次发送时将新对话草稿落库为正式会话
 // 同步迁移 sessionStates[0] 到真实 sessionID
-func (a *app) lazyCreateSession(input string) (int64, error) {
+func (a *app) lazyCreateSession(input string, hasImages bool) (int64, error) {
 	title := makeSessionTitle(input)
+	if strings.TrimSpace(input) == "" && hasImages {
+		title = "图片对话"
+	}
 	id, err := a.store.CreateSession(a.ctx, title)
 	if err != nil {
 		return 0, fmt.Errorf("新建会话失败: %w", err)
@@ -304,6 +448,9 @@ func (a *app) deleteSession(sessionID int64) error {
 			state.cancel = nil
 		}
 		state.resolveConfirm(false)
+		for _, p := range state.pendingImages {
+			a.thumbs.evict(pendingThumbKey(p.id))
+		}
 	}
 
 	if err := a.store.DeleteSession(a.ctx, sessionID); err != nil {
@@ -349,16 +496,20 @@ func (a *app) updateUI(fn func()) {
 	}
 }
 
-// 提交本轮用户输入并在后台异步推进 Loop
+// 提交本轮用户输入（可含图片附件）并在后台异步推进 Loop
 // 所有跨 goroutine 的界面状态更新均通过 a.updateUI 回到主线程执行
 func (a *app) submit(submitID int64, submitInputText string) {
+	draftImages := a.sessionState(submitID).pendingImages
+	if strings.TrimSpace(submitInputText) == "" && len(draftImages) == 0 {
+		return
+	}
 	if strings.TrimSpace(a.cfg.APIKey) == "" {
 		a.sessionState(submitID).err = errors.New("请先在设置中配置 APIKey")
 		return
 	}
 
 	if submitID == 0 {
-		newID, err := a.lazyCreateSession(submitInputText)
+		newID, err := a.lazyCreateSession(submitInputText, len(draftImages) > 0)
 		if err != nil {
 			a.sessionState(0).err = err
 			return
@@ -375,10 +526,29 @@ func (a *app) submit(submitID int64, submitInputText string) {
 		}
 	}
 
+	var savedImages []apis.Image
+	if len(submitState.pendingImages) > 0 {
+		savedImages = make([]apis.Image, 0, len(submitState.pendingImages))
+		for _, p := range submitState.pendingImages {
+			saved, err := a.store.SaveImage(a.ctx, submitID, p.name, p.data)
+			if err != nil {
+				for _, prev := range savedImages {
+					_ = os.Remove(prev.Path)
+				}
+				submitState.err = fmt.Errorf("保存图片附件失败: %w", err)
+				return
+			}
+			savedImages = append(savedImages, saved)
+		}
+	}
+
 	submitLoop := submitState.loop // 取得指定 session 的 loop
 	if submitLoop == nil {         // loop 为空，新建
 		submitLoop = agent.NewLoop(a.store, a.registry)
 		if err := submitLoop.BindSession(a.ctx, submitID); err != nil { // 绑定 loop 至 session
+			for _, prev := range savedImages {
+				_ = os.Remove(prev.Path)
+			}
 			submitState.err = err
 			return
 		}
@@ -434,15 +604,24 @@ func (a *app) submit(submitID int64, submitInputText string) {
 	submitState.running = true
 	submitState.err = nil
 	submitState.inputText = ""
+	for _, p := range submitState.pendingImages {
+		a.thumbs.evict(pendingThumbKey(p.id))
+	}
+	submitState.pendingImages = nil
 	submitState.curReply = nil
 	submitState.messages = append(submitState.messages, &chatMessage{
-		Message: apis.Message{Role: "user", Content: submitInputText},
+		Message: apis.Message{
+			Role:    "user",
+			Content: submitInputText,
+			Images:  slices.Clone(savedImages),
+		},
 	}) // 追加窗口对话历史
 
 	go func() { // 后台 session 运行
 		defer cancel()
 		err := submitLoop.RunTurn(turnCtx, agent.TurnRequest{
 			Input:   submitInputText,
+			Images:  savedImages,
 			Client:  turnClient,
 			Opts:    turnOpts,
 			Output:  outputFunc,

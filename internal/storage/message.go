@@ -21,6 +21,15 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID int64, msg apis.Mes
 		callsJSON = string(data)
 	}
 
+	imagesJSON := "[]"
+	if len(msg.Images) > 0 {
+		data, err := json.Marshal(s.toStoredImages(msg.Images))
+		if err != nil {
+			return fmt.Errorf("序列化 images 失败: %w", err)
+		}
+		imagesJSON = string(data)
+	}
+
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("开启写入消息事务失败: %w", err)
@@ -30,14 +39,15 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID int64, msg apis.Mes
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO messages
-		(session_id, role, content, reasoning_content, tool_calls, tool_call_id)
-		VALUES (?, ?, ?, ?, ?, ?);`,
+		(session_id, role, content, reasoning_content, tool_calls, tool_call_id, images)
+		VALUES (?, ?, ?, ?, ?, ?, ?);`,
 		sessionID,
 		msg.Role,
 		msg.Content,
 		msg.ReasoningContent,
 		callsJSON,
 		msg.ToolCallID,
+		imagesJSON,
 	); err != nil {
 		return fmt.Errorf("插入 messages 失败: %w", err)
 	}
@@ -77,7 +87,7 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT role, content, reasoning_content, tool_calls, tool_call_id
+		`SELECT role, content, reasoning_content, tool_calls, tool_call_id, images
 		FROM messages
 		WHERE session_id = ?
 		ORDER BY id;`,
@@ -91,13 +101,14 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 	var msgs []apis.Message
 	for rows.Next() {
 		var msg apis.Message
-		var rawCalls string
+		var rawCalls, rawImages string
 		if err := rows.Scan(
 			&msg.Role,
 			&msg.Content,
 			&msg.ReasoningContent,
 			&rawCalls,
 			&msg.ToolCallID,
+			&rawImages,
 		); err != nil {
 			return nil, fmt.Errorf("扫描 messages 失败: %w", err)
 		}
@@ -109,6 +120,15 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 			}
 			if len(calls) > 0 {
 				msg.ToolCalls = calls
+			}
+		}
+		if rawImages != "" {
+			var imgs []apis.Image
+			if err := json.Unmarshal([]byte(rawImages), &imgs); err != nil {
+				return nil, fmt.Errorf("解析 images 失败: %w", err)
+			}
+			if len(imgs) > 0 {
+				msg.Images = s.fromStoredImages(imgs)
 			}
 		}
 		msgs = append(msgs, msg)

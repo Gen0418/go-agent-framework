@@ -244,3 +244,19 @@ func TestSessionStateToolGroupToggles(t *testing.T) {
 		t.Fatalf("重新开启本地命令后未恢复 bash: %+v", s.opts.Tools)
 	}
 }
+
+func TestSessionStatePendingImages(t *testing.T) {
+	s := &sessionState{}
+	s.addPendingImage(pendingImage{id: 1, name: "a.png", mime: "image/png", data: []byte{1, 2, 3}})
+	s.addPendingImage(pendingImage{id: 2, name: "b.jpg", mime: "image/jpeg", data: []byte{4, 5}})
+
+	if s.pendingImageBytes() != 5 || len(s.pendingImages) != 2 {
+		t.Fatalf("pendingImages 状态异常: count=%d bytes=%d", len(s.pendingImages), s.pendingImageBytes())
+	}
+	if s.removePendingImage(99) {
+		t.Fatal("移除不存在的图片 ID 应返回 false")
+	}
+	if !s.removePendingImage(1) || len(s.pendingImages) != 1 || s.pendingImages[0].id != 2 || s.pendingImageBytes() != 2 {
+		t.Fatalf("移除图片 1 后状态异常: %+v", s.pendingImages)
+	}
+}

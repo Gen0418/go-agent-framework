@@ -135,6 +135,20 @@ func (c *CLI) PrintHistory(ctx context.Context, msgs []apis.Message) error {
 				return err
 			}
 		}
+		if len(msg.Images) > 0 {
+			for _, img := range msg.Images {
+				label := "[图片]"
+				if name := strings.TrimSpace(img.Name); name != "" {
+					label = fmt.Sprintf("[图片: %s]", name)
+				}
+				if err := c.WriteOutput(ctx, agent.OutputEvent{
+					Kind: agent.OutputContent,
+					Text: "\n" + label,
+				}); err != nil {
+					return err
+				}
+			}
+		}
 		if strings.TrimSpace(msg.Content) != "" {
 			c.inReasoning = false
 			if err := c.WriteOutput(ctx, agent.OutputEvent{

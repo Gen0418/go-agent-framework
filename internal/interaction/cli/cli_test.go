@@ -139,3 +139,25 @@ func TestWriteOutputReasoningToContentNewline(t *testing.T) {
 		t.Fatalf("输出 = %q，预期 %q", out.String(), want)
 	}
 }
+
+func TestPrintHistoryImages(t *testing.T) {
+	var out bytes.Buffer
+	terminal := New(strings.NewReader(""), &out)
+	err := terminal.PrintHistory(t.Context(), []apis.Message{
+		{
+			Role:    "user",
+			Content: "看看报错",
+			Images: []apis.Image{
+				{Path: "attachments/pic/1/a.png", MIME: "image/png", Name: "error.png"},
+				{Path: "attachments/pic/1/b.png", MIME: "image/png"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PrintHistory 失败: %v", err)
+	}
+	want := "\n[图片: error.png]\n[图片]\n看看报错"
+	if out.String() != want {
+		t.Fatalf("带图历史输出 = %q，预期 %q", out.String(), want)
+	}
+}

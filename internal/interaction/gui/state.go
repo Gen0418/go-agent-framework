@@ -13,6 +13,14 @@ import (
 type scrollKey int64
 type inputKey int64
 
+// 待发送的草稿图片附件（发送时才持久化写入 attachments/pic/<sessionID>/）
+type pendingImage struct {
+	id   int64
+	name string
+	mime string
+	data []byte
+}
+
 // 单会话状态
 type sessionState struct {
 	loop          *agent.Loop        // 会话所绑定 Loop
@@ -20,9 +28,10 @@ type sessionState struct {
 	messages      []*chatMessage
 	curReply      *chatMessage
 	confirm       *confirmToolCall
-	inputText     string // 提交内容
-	historyLoaded bool   // 判断会话内容是否已加载
-	running       bool   // 判断会话是否正在运行
+	inputText     string         // 提交内容
+	pendingImages []pendingImage // 待发送图片附件草稿
+	historyLoaded bool           // 判断会话内容是否已加载
+	running       bool           // 判断会话是否正在运行
 	cancel        context.CancelFunc
 	err           error // 会话级错误
 }
@@ -77,6 +86,29 @@ func (s *sessionState) syncHistory(msgs []apis.Message) {
 	}
 	s.messages = next
 	s.curReply = nil
+}
+
+func (s *sessionState) addPendingImage(img pendingImage) {
+	s.pendingImages = append(s.pendingImages, img)
+}
+
+func (s *sessionState) removePendingImage(id int64) bool {
+	idx := slices.IndexFunc(s.pendingImages, func(img pendingImage) bool {
+		return img.id == id
+	})
+	if idx < 0 {
+		return false
+	}
+	s.pendingImages = slices.Delete(s.pendingImages, idx, idx+1)
+	return true
+}
+
+func (s *sessionState) pendingImageBytes() int64 {
+	var total int64
+	for _, img := range s.pendingImages {
+		total += int64(len(img.data))
+	}
+	return total
 }
 
 func (s *sessionState) resolveConfirm(allow bool) {

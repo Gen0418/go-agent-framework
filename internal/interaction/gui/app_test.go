@@ -1,13 +1,19 @@
 package gui
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -18,6 +24,7 @@ import (
 	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/storage"
 
+	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -958,5 +965,214 @@ func TestMultiSessionConfirmSwitchAndPersistence(t *testing.T) {
 		if !reflect.DeepEqual(got, reloaded) {
 			t.Fatalf("%s 界面消息与数据库历史不一致:\n界面=%+v\n库内=%+v", tc.name, got, reloaded)
 		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func makeGUITestPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	img.Set(0, 0, color.RGBA{R: 40, G: 120, B: 220, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func makeGUITestJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestGUIImagePickerPasteDropAndRemove(t *testing.T) {
+	dir := t.TempDir()
+	pngBytes := makeGUITestPNG(t)
+	jpgBytes := makeGUITestJPEG(t)
+
+	shotPath := filepath.Join(dir, "shot.png")
+	dropPath := filepath.Join(dir, "photo.jpg")
+	badPath := filepath.Join(dir, "fake.png")
+	for path, data := range map[string][]byte{
+		shotPath: pngBytes,
+		dropPath: jpgBytes,
+		badPath:  []byte("not a real image"),
+	} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a := &app{
+		cfg: config.Config{DefaultModel: "deepseek-flash"},
+		sessions: sessionList{
+			list:       []storage.Session{{ID: 1, Title: "图片输入测试"}},
+			selectedID: 1,
+		},
+		sessionStates: map[int64]*sessionState{
+			1: {historyLoaded: true},
+		},
+		pickImages: func(cb func([]string, error)) {
+			cb([]string{shotPath, badPath}, nil)
+		},
+	}
+
+	tt := ui.NewTester(a.view, 960, 640)
+	state := a.sessionState(1)
+
+	// 1. 点击“+ 图片”选择混合有效/无效文件：保留合法图片，同时在横幅提示无效文件错误
+	mustClick(t, tt, "添加图片")
+	if len(state.pendingImages) != 1 || state.pendingImages[0].name != "shot.png" {
+		t.Fatalf("选图后 pendingImages = %+v，预期仅包含 shot.png", state.pendingImages)
+	}
+	if state.err == nil || !strings.Contains(state.err.Error(), "fake.png") {
+		t.Fatalf("无效图片应报错提示 fake.png，实际 err = %v", state.err)
+	}
+
+	// 2. 聚焦输入框并 Cmd/Ctrl+V 粘贴截图 PNG：新增草稿图片且不往输入框写乱码
+	mustClick(t, tt, "消息输入框")
+	tt.SetClipboardData(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, pngBytes))))
+	tt.Key(ui.Cmd, ui.KeyV)
+	if len(state.pendingImages) != 2 || state.pendingImages[1].name != "粘贴图片.png" {
+		t.Fatalf("粘贴截图后 pendingImages = %+v，预期新增粘贴图片.png", state.pendingImages)
+	}
+
+	// 3. 普通文本粘贴仍正常进入输入框，不误触发图片附件
+	tt.SetClipboard("帮我看看这两张图")
+	tt.Key(ui.Cmd, ui.KeyV)
+	if state.inputText != "帮我看看这两张图" || len(state.pendingImages) != 2 {
+		t.Fatalf("普通文本粘贴异常: input=%q, images=%d", state.inputText, len(state.pendingImages))
+	}
+
+	// 4. 拖拽 JPEG 文件到聊天区：自动追加到待发图片预览条
+	if !tt.DropFiles(600, 260, dropPath) {
+		t.Fatal("聊天区应接受拖入文件")
+	}
+	if len(state.pendingImages) != 3 || state.pendingImages[2].name != "photo.jpg" {
+		t.Fatalf("拖入图片后 pendingImages = %+v，预期新增 photo.jpg", state.pendingImages)
+	}
+
+	// 5. 点击缩略图右上角 × 移除 shot.png
+	mustClick(t, tt, "移除图片 shot.png")
+	if len(state.pendingImages) != 2 {
+		t.Fatalf("移除 shot.png 后应剩余 2 张图，实际 = %d", len(state.pendingImages))
+	}
+	for _, img := range state.pendingImages {
+		if img.name == "shot.png" {
+			t.Fatal("shot.png 未被移除")
+		}
+	}
+}
+
+func TestGUIImageOnlySubmitAndHistoryThumbnails(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agent.db")
+	store, err := storage.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	var capturedBody []byte
+	var openedPaths []string
+	uiCh := make(chan func(), 32)
+	a := &app{
+		ctx:      t.Context(),
+		store:    store,
+		dispatch: func(fn func()) { uiCh <- fn },
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				capturedBody, _ = io.ReadAll(r.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body: io.NopCloser(strings.NewReader(
+						"data: " + `{"choices":[{"delta":{"content":"收到纯图消息"}}]}` + "\n\n" +
+							"data: " + `{"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+							"data: [DONE]\n\n",
+					)),
+				}, nil
+			}),
+		},
+		openPath: func(path string) error {
+			openedPaths = append(openedPaths, path)
+			return nil
+		},
+		cfg: config.Config{
+			APIKey:       "sk-test",
+			Endpoint:     "https://api.deepseek.com/chat/completions",
+			DefaultModel: "deepseek-flash",
+		},
+		sessionStates: make(map[int64]*sessionState),
+	}
+
+	pngBytes := makeGUITestPNG(t)
+	a.attachImageBytes(0, "clip.png", pngBytes)
+
+	tt := ui.NewTester(a.view, 960, 640)
+
+	// 1. 不输入任何文字，直接点击“发送”提交纯图片草稿
+	mustClick(t, tt, "发送")
+	if a.sessions.selectedID == 0 || len(a.sessions.list) != 1 || a.sessions.list[0].Title != "图片对话" {
+		t.Fatalf("纯图懒创建会话异常: selected=%d list=%+v", a.sessions.selectedID, a.sessions.list)
+	}
+	sid := a.sessions.selectedID
+	state := a.sessionState(sid)
+	if len(state.pendingImages) != 0 {
+		t.Fatalf("发送后待发图片草稿应清空，实际 = %d", len(state.pendingImages))
+	}
+
+	deadline := time.After(5 * time.Second)
+	for state.running {
+		select {
+		case fn := <-uiCh:
+			fn()
+		case <-deadline:
+			t.Fatal("等待纯图对话生成完成超时")
+		}
+	}
+	if state.err != nil {
+		t.Fatalf("纯图发送流程出错: %v", state.err)
+	}
+
+	// 2. 验证请求体按多模态 image_url 编码，且文件确实落盘到 attachments/pic/<sid>/
+	bodyStr := string(capturedBody)
+	if !strings.Contains(bodyStr, `"type":"image_url"`) || !strings.Contains(bodyStr, `"data:image/png;base64,`) {
+		t.Fatalf("请求体未包含多模态图片编码: %s", bodyStr)
+	}
+	if len(state.messages) != 2 || len(state.messages[0].Images) != 1 {
+		t.Fatalf("完成后的会话消息异常: %+v", state.messages)
+	}
+	savedPath := state.messages[0].Images[0].Path
+	wantDir := filepath.Join(dir, "attachments", "pic", fmt.Sprint(sid))
+	if !strings.HasPrefix(savedPath, wantDir+string(filepath.Separator)) {
+		t.Fatalf("图片未落盘到 attachments/pic/%d: %q", sid, savedPath)
+	}
+
+	// 3. 历史气泡渲染图片缩略图，点击触发预览回调
+	tt.Frame()
+	mustClick(t, tt, "查看图片 clip.png")
+	if len(openedPaths) != 1 || openedPaths[0] != savedPath {
+		t.Fatalf("点击历史缩略图未打开预期路径: got=%q want=%q", openedPaths, savedPath)
+	}
+
+	// 4. 磁盘文件被外部移除后，清缓存重绘应优雅展示“图片不可用”而不报错崩溃
+	if err := os.Remove(savedPath); err != nil {
+		t.Fatal(err)
+	}
+	a.thumbs.evict("file:" + savedPath)
+	tt.Frame()
+	if !tt.HasText("图片不可用") {
+		t.Fatalf("缺失图片文件时应展示兜底占位，当前文本: %q", tt.Texts())
 	}
 }

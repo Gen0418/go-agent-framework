@@ -1,13 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -707,4 +711,72 @@ func TestRunTurnPerTurnOptsAndClient(t *testing.T) {
 		secondReqs[0].ReasoningEffort != "" || len(secondReqs[0].Tools) != 0 {
 		t.Fatalf("第二轮请求不符: %+v", secondReqs)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestRunTurnWithImagesPersistsAndEncodesMultimodal(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agent.db")
+	store, err := storage.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	loop := NewLoop(store, nil)
+	if err := loop.NewSession(t.Context(), "多模态测试"); err != nil {
+		t.Fatal(err)
+	}
+
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	img, err := store.SaveImage(t.Context(), loop.SessionID(), "screen.png", pngBuf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedBody []byte
+	client := &apis.Client{
+		Endpoint: "https://api.deepseek.com/chat/completions",
+		APIKey:   "sk-test",
+		Model:    "deepseek-flash",
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				capturedBody, _ = io.ReadAll(r.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(replyStream)),
+				}, nil
+			}),
+		},
+	}
+
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   "看看这张图",
+		Images:  []apis.Image{img},
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
+		t.Fatalf("RunTurn 失败: %v", err)
+	}
+
+	// 验证请求体按 OpenAI 多模态格式发送了 text + image_url
+	bodyStr := string(capturedBody)
+	if !strings.Contains(bodyStr, `"type":"image_url"`) || !strings.Contains(bodyStr, `"data:image/png;base64,`) || !strings.Contains(bodyStr, `"看看这张图"`) {
+		t.Fatalf("发送请求体未按多模态块数组编码: %s", bodyStr)
+	}
+
+	want := []apis.Message{
+		{Role: "user", Content: "看看这张图", Images: []apis.Image{img}},
+		{Role: "assistant", ReasoningContent: "思考", Content: "答复"},
+	}
+	assertHistory(t, loop, want)
 }

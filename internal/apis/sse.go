@@ -20,9 +20,18 @@ const (
 // 流式对话入口，返回iter.Seq2回调函数用于range
 func (c *Client) StreamChat(ctx context.Context, msgs []Message, opts StreamOptions) iter.Seq2[StreamEvent, error] {
 	return func(yield func(StreamEvent, error) bool) {
-		reqBody, err := json.Marshal(c.newChatRequest(msgs, opts))
+		chatReq, err := c.newChatRequest(msgs, opts)
 		if err != nil {
 			yield(StreamEvent{}, err)
+			return
+		}
+		reqBody, err := json.Marshal(chatReq)
+		if err != nil {
+			yield(StreamEvent{}, err)
+			return
+		}
+		if len(reqBody) > MaxImageRequestBytes {
+			yield(StreamEvent{}, fmt.Errorf("请求体大小（%d 字节）超过上限（%d 字节），请减少图片数量或体积", len(reqBody), MaxImageRequestBytes))
 			return
 		}
 

@@ -31,6 +31,9 @@ config.json
 *.sqlite3-shm
 *.sqlite3-wal
 
+# Local runtime attachments
+attachments/
+
 # Local docs (review notes)
 /docs/internal/*
 !/docs/internal/.gitkeep

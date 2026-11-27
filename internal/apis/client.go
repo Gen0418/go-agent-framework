@@ -79,7 +79,7 @@ func deriveBaseURL(endpoint string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-func (c *Client) newChatRequest(msgs []Message, opts StreamOptions) chatRequest {
+func (c *Client) newChatRequest(msgs []Message, opts StreamOptions) (chatRequest, error) {
 	thinkingType := thinkingDisabled
 	effort := ""
 	if opts.Thinking {
@@ -87,12 +87,17 @@ func (c *Client) newChatRequest(msgs []Message, opts StreamOptions) chatRequest 
 		effort = opts.ReasoningEffort
 	}
 
+	reqMsgs, err := encodeRequestMessages(msgs)
+	if err != nil {
+		return chatRequest{}, err
+	}
+
 	return chatRequest{
 		Model:           c.Model,
-		Messages:        msgs,
+		Messages:        reqMsgs,
 		Stream:          true,
 		Thinking:        &enableThinking{Type: thinkingType},
 		ReasoningEffort: effort,
 		Tools:           opts.Tools,
-	}
+	}, nil
 }

@@ -4,6 +4,7 @@ var latestVersion = len(schema)
 
 var schema = [][]string{
 	rawV1,
+	rawV2,
 }
 
 var rawV1 = []string{
@@ -41,4 +42,8 @@ var rawV1 = []string{
 
 	`CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);`,
 	`CREATE INDEX IF NOT EXISTS idx_api_calls_session ON api_calls(session_id, id);`,
+}
+
+var rawV2 = []string{
+	`ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]';`,
 }

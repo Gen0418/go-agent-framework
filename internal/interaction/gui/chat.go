@@ -1,6 +1,8 @@
 package gui
 
 import (
+	"go-agent-framework/internal/apis"
+
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 )
@@ -18,17 +20,26 @@ type chatProps struct {
 	curReply         *chatMessage
 	listState        *ui.ListState
 	md               *markdown.Options
+	thumbForImage    func(apis.Image) *ui.Bitmap
+	onOpenImage      func(apis.Image)
+	onDropFiles      func(paths []string)
 	confirm          *confirmToolCall
 	onConfirm        func(allow bool)
 	composer         composerProps
 }
 
 // 聊天主区组件
-// 包含顶部标题栏、可关闭错误横幅、自动跟底消息列表/空态引导、工具确认卡与底部输入区
+// 包含顶部标题栏、可关闭错误横幅、自动跟底消息列表/空态引导、工具确认卡与底部输入区，并支持拖入图片文件
 func renderChat(c *ui.Context, props chatProps) {
 	t := c.Theme()
 
-	ui.Column(c).Grow(1).MinWidth(0).FillHeight().Background(t.Background).Children(func() {
+	root := ui.Column(c).Grow(1).MinWidth(0).FillHeight().Background(t.Background)
+	if files := root.DroppedFiles(); len(files) > 0 && !props.running && props.onDropFiles != nil {
+		props.onDropFiles(files)
+	}
+	dragOver := !props.running && root.FileDragOver()
+
+	root.Children(func() {
 		renderChatHeader(c, props)
 
 		if props.err != nil {
@@ -38,14 +49,16 @@ func renderChat(c *ui.Context, props chatProps) {
 		renderMessageList(c, props)
 
 		if props.confirm != nil {
-			ui.Box(c).Shrink(0).Padding(0, 20, 8, 20).Children(func() {
+			ui.Box(c.Key("confirm")).Shrink(0).Padding(0, 20, 8, 20).Children(func() {
 				renderConfirmCard(c, props.confirm, props.onConfirm)
 			})
 		}
 
-		ui.Box(c).Shrink(0).Padding(8, 20, 16, 20).Children(func() {
+		composer := props.composer
+		composer.dragOver = dragOver
+		ui.Box(c.Key("composer")).Shrink(0).Padding(8, 20, 16, 20).Children(func() {
 			chatColumn(c).Children(func() {
-				renderComposer(c, props.composer)
+				renderComposer(c, composer)
 			})
 		})
 	})
@@ -73,7 +86,7 @@ func renderChatHeader(c *ui.Context, props chatProps) {
 func renderMessageList(c *ui.Context, props chatProps) {
 	t := c.Theme()
 
-	ui.Box(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
+	ui.Box(c.Key("messages")).Grow(1).MinHeight(0).FillWidth().Children(func() {
 		if len(props.messages) == 0 {
 			ui.Column(c).Fill().Children(func() {
 				ui.Column(c).Margin(ui.Auto).AlignItems(ui.Center).Gap(8).Padding(24).Children(func() {
@@ -102,6 +115,8 @@ func renderMessageList(c *ui.Context, props chatProps) {
 							list.HoldPlace()
 						}
 					},
+					thumbForImage: props.thumbForImage,
+					onOpenImage:   props.onOpenImage,
 				})
 			})
 		}).Fill().Padding(16, 20).Gap(16)

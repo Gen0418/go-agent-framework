@@ -109,5 +109,8 @@ func (s *Store) DeleteSession(ctx context.Context, sessionID int64) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交删除会话事务失败: %w", err)
 	}
+	if err := s.removeSessionAttachments(sessionID); err != nil {
+		return err
+	}
 	return nil
 }
