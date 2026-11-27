@@ -17,6 +17,22 @@ const (
 	doneSentinel = "[DONE]"
 )
 
+// SSE 单个增量事件中的 delta 结构
+type delta struct {
+	Role             string          `json:"role"`
+	Content          string          `json:"content"`
+	ReasoningContent string          `json:"reasoning_content"`
+	ToolCalls        []toolCallDelta `json:"tool_calls"`
+}
+
+// SSE 单帧 JSON 响应块
+type chatResponseChunk struct {
+	Choices []struct {
+		Delta        delta  `json:"delta"`
+		FinishReason string `json:"finish_reason"` // ""表示流尚未结束
+	} `json:"choices"`
+}
+
 // 流式对话入口，返回iter.Seq2回调函数用于range
 func (c *Client) StreamChat(ctx context.Context, msgs []Message, opts StreamOptions) iter.Seq2[StreamEvent, error] {
 	return func(yield func(StreamEvent, error) bool) {

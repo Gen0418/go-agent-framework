@@ -149,6 +149,20 @@ func (c *CLI) PrintHistory(ctx context.Context, msgs []apis.Message) error {
 				}
 			}
 		}
+		if len(msg.Files) > 0 {
+			for _, file := range msg.Files {
+				label := "[文件]"
+				if name := strings.TrimSpace(file.Name); name != "" {
+					label = fmt.Sprintf("[文件: %s]", name)
+				}
+				if err := c.WriteOutput(ctx, agent.OutputEvent{
+					Kind: agent.OutputContent,
+					Text: "\n" + label,
+				}); err != nil {
+					return err
+				}
+			}
+		}
 		if strings.TrimSpace(msg.Content) != "" {
 			c.inReasoning = false
 			if err := c.WriteOutput(ctx, agent.OutputEvent{

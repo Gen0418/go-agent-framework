@@ -5,6 +5,7 @@ var latestVersion = len(schema)
 var schema = [][]string{
 	rawV1,
 	rawV2,
+	rawV3,
 }
 
 var rawV1 = []string{
@@ -46,4 +47,8 @@ var rawV1 = []string{
 
 var rawV2 = []string{
 	`ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]';`,
+}
+
+var rawV3 = []string{
+	`ALTER TABLE messages ADD COLUMN files TEXT NOT NULL DEFAULT '[]';`,
 }

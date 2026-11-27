@@ -7,17 +7,7 @@ import (
 	"strings"
 )
 
-type ToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function ToolCallFunction `json:"function"`
-}
-
-type ToolCallFunction struct {
-	Name string `json:"name"`
-	Args string `json:"arguments"`
-}
-
+// SSE 流式返回中的工具调用分片
 type toolCallDelta struct {
 	ToolCall
 	Index int `json:"index"`

@@ -30,6 +30,15 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID int64, msg apis.Mes
 		imagesJSON = string(data)
 	}
 
+	filesJSON := "[]"
+	if len(msg.Files) > 0 {
+		data, err := json.Marshal(s.toStoredFiles(msg.Files))
+		if err != nil {
+			return fmt.Errorf("序列化 files 失败: %w", err)
+		}
+		filesJSON = string(data)
+	}
+
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("开启写入消息事务失败: %w", err)
@@ -39,8 +48,8 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID int64, msg apis.Mes
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO messages
-		(session_id, role, content, reasoning_content, tool_calls, tool_call_id, images)
-		VALUES (?, ?, ?, ?, ?, ?, ?);`,
+		(session_id, role, content, reasoning_content, tool_calls, tool_call_id, images, files)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
 		sessionID,
 		msg.Role,
 		msg.Content,
@@ -48,6 +57,7 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID int64, msg apis.Mes
 		callsJSON,
 		msg.ToolCallID,
 		imagesJSON,
+		filesJSON,
 	); err != nil {
 		return fmt.Errorf("插入 messages 失败: %w", err)
 	}
@@ -87,7 +97,7 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT role, content, reasoning_content, tool_calls, tool_call_id, images
+		`SELECT role, content, reasoning_content, tool_calls, tool_call_id, images, files
 		FROM messages
 		WHERE session_id = ?
 		ORDER BY id;`,
@@ -101,7 +111,7 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 	var msgs []apis.Message
 	for rows.Next() {
 		var msg apis.Message
-		var rawCalls, rawImages string
+		var rawCalls, rawImages, rawFiles string
 		if err := rows.Scan(
 			&msg.Role,
 			&msg.Content,
@@ -109,6 +119,7 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 			&rawCalls,
 			&msg.ToolCallID,
 			&rawImages,
+			&rawFiles,
 		); err != nil {
 			return nil, fmt.Errorf("扫描 messages 失败: %w", err)
 		}
@@ -129,6 +140,15 @@ func (s *Store) LoadHistory(ctx context.Context, sessionID int64) ([]apis.Messag
 			}
 			if len(imgs) > 0 {
 				msg.Images = s.fromStoredImages(imgs)
+			}
+		}
+		if rawFiles != "" {
+			var files []apis.File
+			if err := json.Unmarshal([]byte(rawFiles), &files); err != nil {
+				return nil, fmt.Errorf("解析 files 失败: %w", err)
+			}
+			if len(files) > 0 {
+				msg.Files = s.fromStoredFiles(files)
 			}
 		}
 		msgs = append(msgs, msg)

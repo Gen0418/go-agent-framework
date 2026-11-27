@@ -260,3 +260,39 @@ func TestSessionStatePendingImages(t *testing.T) {
 		t.Fatalf("移除图片 1 后状态异常: %+v", s.pendingImages)
 	}
 }
+
+func TestSessionStatePendingFilesAndDocToggle(t *testing.T) {
+	s := &sessionState{}
+	if s.docRichLayout {
+		t.Fatal("新会话默认应关闭文档图表识别（默认使用 text_recognition）")
+	}
+	s.docRichLayout = true
+	if !s.docRichLayout {
+		t.Fatal("开启 docRichLayout 后应为 true")
+	}
+
+	f1 := &pendingFile{id: 10, name: "report.pdf", status: fileUploading}
+	f2 := &pendingFile{id: 11, name: "notes.md", status: fileReady, fileID: "file-api-1"}
+	s.addPendingFile(f1)
+	s.addPendingFile(f2)
+
+	if !s.hasBlockingFiles() {
+		t.Fatal("存在上传中附件时 hasBlockingFiles 应为 true")
+	}
+	f1.status = fileFailed
+	if !s.hasBlockingFiles() {
+		t.Fatal("存在上传失败附件时 hasBlockingFiles 应为 true")
+	}
+	f1.status = fileReady
+	if s.hasBlockingFiles() {
+		t.Fatal("全部附件就绪后 hasBlockingFiles 应为 false")
+	}
+
+	if got, ok := s.removePendingFile(999); ok || got != nil {
+		t.Fatalf("移除不存在的附件 ID 应返回 (nil, false)，实际 = (%+v, %v)", got, ok)
+	}
+	removed, ok := s.removePendingFile(10)
+	if !ok || removed != f1 || len(s.pendingFiles) != 1 || s.pendingFiles[0].id != 11 {
+		t.Fatalf("移除附件 10 后状态异常: removed=%+v files=%+v", removed, s.pendingFiles)
+	}
+}

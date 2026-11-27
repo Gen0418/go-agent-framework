@@ -13,81 +13,107 @@ import (
 
 var reasoningEfforts = []string{"low", "high", "max"}
 
+type inputKey int64
+
+// 会话选项浮层中的独立开关项（本地命令、联网搜索）
+type optionToggle struct {
+	label    string
+	checked  bool
+	onChange func(bool)
+}
+
+// 输入区附件预览与交互回调函数集合
+type attachmentHandlers struct {
+	thumbForPending   func(pendingImage) *ui.Bitmap
+	thumbForPath      func(path string) *ui.Bitmap
+	onPickFiles       func()
+	onPasteImageFiles func(paths []string)
+	onPasteImage      func(data []byte)
+	onRemoveImage     func(id int64)
+	onRemoveFile      func(id int64)
+	onRetryFile       func(id int64)
+}
+
 // 输入区参数
 type composerProps struct {
-	sessionID          int64
-	inputText          *string
-	pendingImages      []pendingImage
-	thumbForPending    func(pendingImage) *ui.Bitmap
-	onPickImages       func()
-	onDropFiles        func(paths []string)
-	onPasteImage       func(data []byte)
-	onRemoveImage      func(id int64)
-	dragOver           bool
-	model              string
-	opts               *apis.StreamOptions
-	hasLocalTools      bool
-	localToolsOn       bool
-	onToggleLocalTools func(enabled bool)
-	hasWebTools        bool
-	webToolsOn         bool
-	onToggleWebTools   func(enabled bool)
-	optsPopover        *optsPopover
-	running            bool
-	onSubmit           func(text string)
-	onStop             func()
+	sessionID   int64
+	model       string
+	dragOver    bool
+	state       *sessionState
+	optsPopover *optsPopover
+	toolToggles []optionToggle
+	attachments attachmentHandlers
+	onSubmit    func(text string)
+	onStop      func()
 }
 
 // 底部输入区组件
-// 一体化圆角卡片，含待发图片预览、自适应输入框（Enter 发送、Shift+Enter 换行、支持粘贴图片）、添加图片、选项浮层与发送/停止按钮
+// 一体化圆角卡片，含待发图片/文件预览条、自适应输入框（Enter 发送、Shift+Enter 换行、支持粘贴图片与拖入附件）、添加附件、选项浮层与发送/停止按钮
 func renderComposer(c *ui.Context, props composerProps) {
+	state := props.state
+	if state == nil {
+		return
+	}
 	svc := c.Services()
+	att := props.attachments
+	blocking := state.hasBlockingFiles()
+
 	composerCard(c, props.dragOver, func() {
-		if len(props.pendingImages) > 0 {
-			pendingImageStrip(c, props.pendingImages, props.thumbForPending, props.onRemoveImage)
+		if len(state.pendingImages) > 0 || len(state.pendingFiles) > 0 {
+			pendingAttachmentStrip(
+				c,
+				state.pendingImages,
+				state.pendingFiles,
+				att.thumbForPending,
+				att.thumbForPath,
+				att.onRemoveImage,
+				att.onRemoveFile,
+				att.onRetryFile,
+			)
 		}
 
-		ui.TextAreaBase(c.Key(inputKey(props.sessionID)), props.inputText).
+		ui.TextAreaBase(c.Key(inputKey(props.sessionID)), &state.inputText).
 			FillWidth().
 			Lines(1, 6).
 			FontSize(14).
 			LineHeight(1.5).
 			Padding(2, 2).
-			Placeholder("输入消息…  Enter 发送，Shift+Enter 换行，支持粘贴或拖入图片").
+			Placeholder("输入消息…  Enter 发送，Shift+Enter 换行，支持粘贴截图或拖入附件").
 			Label("消息输入框").
 			OnTextKey(func(k ui.TextKey) bool {
 				if k.Key != ui.KeyEnter || k.Mods != 0 {
 					return false
 				}
 				text := k.Text()
-				if props.running || (strings.TrimSpace(text) == "" && len(props.pendingImages) == 0) || props.onSubmit == nil {
+				hasAttachment := len(state.pendingImages) > 0 || len(state.pendingFiles) > 0
+				if state.running || blocking || (strings.TrimSpace(text) == "" && !hasAttachment) || props.onSubmit == nil {
 					return true
 				}
-				*props.inputText = text
+				state.inputText = text
 				props.onSubmit(text)
-				if *props.inputText == "" {
+				if state.inputText == "" {
 					k.SetText("")
 				}
 				return true
 			}).
 			OnPaste(func(text string) bool {
-				if props.running {
+				if state.running {
 					return false
 				}
 				formats := svc.ClipboardFormats()
 				if slices.Contains(formats, transfer.FileList) {
 					data := svc.ReadClipboardData(transfer.FileList)
 					if paths, err := data.Files(); err == nil {
-						if files := filterSupportedImagePaths(paths); len(files) > 0 && props.onDropFiles != nil {
-							props.onDropFiles(files)
+						if files := filterSupportedImagePaths(paths); len(files) > 0 && att.onPasteImageFiles != nil {
+							att.onPasteImageFiles(files)
 							return true
 						}
 					}
 				}
 				if strings.TrimSpace(text) == "" && slices.Contains(formats, transfer.PNG) {
 					data := svc.ReadClipboardData(transfer.PNG)
-					if imgBytes, err := data.Read(transfer.PNG); err == nil && len(imgBytes) > 0 && props.onPasteImage != nil {
-						props.onPasteImage(imgBytes)
+					if imgBytes, err := data.Read(transfer.PNG); err == nil && len(imgBytes) > 0 && att.onPasteImage != nil {
+						att.onPasteImage(imgBytes)
 						return true
 					}
 				}
@@ -95,16 +121,18 @@ func renderComposer(c *ui.Context, props composerProps) {
 			})
 
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
-			props.optsPopover.view(c, props)
-			if props.onPickImages != nil {
-				picBtn := chipButton(c, "+ 图片", "添加图片", false).Disabled(props.running)
-				if picBtn.Clicked() {
-					props.onPickImages()
+			if props.optsPopover != nil {
+				props.optsPopover.view(c, props)
+			}
+			if att.onPickFiles != nil {
+				attachBtn := chipButton(c, "+ 附件", "添加附件", false).Disabled(state.running)
+				if attachBtn.Clicked() {
+					att.onPickFiles()
 				}
 			}
-			renderOptsSummary(c, props.opts)
+			renderOptsSummary(c, &state.opts)
 			ui.Spacer(c)
-			renderSubmitButton(c, props)
+			renderSubmitButton(c, props, blocking)
 		})
 	})
 }
@@ -125,13 +153,14 @@ func renderOptsSummary(c *ui.Context, opts *apis.StreamOptions) {
 }
 
 // 会话选项浮层组件
-// 包含当前模型展示、思考开关与强度切换，以及独立的本地命令/联网搜索开关
+// 包含当前模型展示、思考开关与强度切换，以及本地命令、联网搜索与文档图表识别开关
 type optsPopover struct {
 	visible bool
 }
 
 func (p *optsPopover) view(c *ui.Context, props composerProps) {
 	t := c.Theme()
+	state := props.state
 	optsButton := chipButton(c, "选项", "选项", p.visible)
 	if optsButton.Clicked() {
 		p.visible = !p.visible
@@ -142,48 +171,48 @@ func (p *optsPopover) view(c *ui.Context, props composerProps) {
 			ui.Text(c, fmt.Sprintf("模型: %s", props.model)).FontSize(12).TextColor(t.TextMuted).SingleLine()
 			ui.Divider(c)
 
-			ui.Checkbox(c, &props.opts.Thinking, "思考")
-			if props.opts.Thinking {
-				effortIdx := slices.Index(reasoningEfforts, props.opts.ReasoningEffort)
+			ui.Checkbox(c, &state.opts.Thinking, "思考")
+			if state.opts.Thinking {
+				effortIdx := slices.Index(reasoningEfforts, state.opts.ReasoningEffort)
 				if effortIdx < 0 { // 未设强度时默认 low
 					effortIdx = 0
-					props.opts.ReasoningEffort = reasoningEfforts[0]
+					state.opts.ReasoningEffort = reasoningEfforts[0]
 				}
 				if ui.Segmented(c, &effortIdx, reasoningEfforts...).FillWidth().Changed() {
-					props.opts.ReasoningEffort = reasoningEfforts[effortIdx]
+					state.opts.ReasoningEffort = reasoningEfforts[effortIdx]
 				}
 			}
 
-			if props.hasLocalTools || props.hasWebTools {
+			if len(props.toolToggles) > 0 {
 				ui.Divider(c)
-			}
-			if props.hasLocalTools {
-				localOn := props.localToolsOn
-				if ui.Checkbox(c, &localOn, "允许本地命令").Changed() && props.onToggleLocalTools != nil {
-					props.onToggleLocalTools(localOn)
+				for _, item := range props.toolToggles {
+					checked := item.checked
+					if ui.Checkbox(c, &checked, item.label).Changed() && item.onChange != nil {
+						item.onChange(checked)
+					}
 				}
 			}
-			if props.hasWebTools {
-				webOn := props.webToolsOn
-				if ui.Checkbox(c, &webOn, "允许联网搜索").Changed() && props.onToggleWebTools != nil {
-					props.onToggleWebTools(webOn)
-				}
-			}
+
+			ui.Divider(c)
+			ui.Checkbox(c, &state.docRichLayout, "识别文档图表").
+				Tooltip("默认仅提取纯文本；勾选后在解析 PDF/Word/PPT 时保留并识别图表与版面")
 		})
 	})
 }
 
-func renderSubmitButton(c *ui.Context, props composerProps) {
-	if props.running {
+func renderSubmitButton(c *ui.Context, props composerProps, blocking bool) {
+	state := props.state
+	if state.running {
 		if dangerButton(c, "停止").Clicked() && props.onStop != nil {
 			props.onStop()
 		}
 		return
 	}
-	empty := strings.TrimSpace(*props.inputText) == "" && len(props.pendingImages) == 0
-	if ui.PrimaryButton(c, "发送").Disabled(empty).Padding(6, 16).Clicked() {
+	hasAttachment := len(state.pendingImages) > 0 || len(state.pendingFiles) > 0
+	empty := strings.TrimSpace(state.inputText) == "" && !hasAttachment
+	if ui.PrimaryButton(c, "发送").Disabled(empty || blocking).Padding(6, 16).Clicked() {
 		if props.onSubmit != nil {
-			props.onSubmit(*props.inputText)
+			props.onSubmit(state.inputText)
 		}
 	}
 }

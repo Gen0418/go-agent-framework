@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	// 单条草稿消息允许附带的原始图片总字节上限（36 MiB 原始数据经 Base64 编码后约 48 MiB）
+	// 单条草稿消息允许附带的剪贴板 Base64 原始图片总字节上限（36 MiB 原始数据编码后约 48 MiB）
 	maxDraftImageTotalBytes = 36 << 20
 	maxThumbCacheEntries    = 128
 	draftThumbMaxSide       = 160
 	historyThumbMaxSide     = 320
+	fileSniffReadBytes      = 8192
 )
 
 // 缩略图位图缓存（仅在 UI 主线程访问）
@@ -40,19 +41,19 @@ func (c *imageCache) getPending(img pendingImage) *ui.Bitmap {
 	return bmp
 }
 
-func (c *imageCache) getFile(img apis.Image) *ui.Bitmap {
-	path := strings.TrimSpace(img.Path)
-	if path == "" {
+func (c *imageCache) getPath(path string, maxSide int) *ui.Bitmap {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
 		return nil
 	}
-	key := "file:" + path
+	key := pathThumbKey(trimmed, maxSide)
 	if bmp, ok := c.entries[key]; ok {
 		return bmp
 	}
-	data, err := readBoundedFile(path, apis.MaxImageBytes)
+	data, err := readBoundedFile(trimmed, apis.MaxImageFileBytes)
 	var bmp *ui.Bitmap
 	if err == nil {
-		if decoded, decErr := ui.DecodeBitmapScaled(data, historyThumbMaxSide); decErr == nil {
+		if decoded, decErr := ui.DecodeBitmapScaled(data, maxSide); decErr == nil {
 			bmp = decoded
 		}
 	}
@@ -93,6 +94,10 @@ func (c *imageCache) put(key string, bmp *ui.Bitmap) {
 
 func pendingThumbKey(id int64) string {
 	return fmt.Sprintf("draft:%d", id)
+}
+
+func pathThumbKey(path string, maxSide int) string {
+	return fmt.Sprintf("file:%d:%s", maxSide, strings.TrimSpace(path))
 }
 
 func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
@@ -139,13 +144,79 @@ func validateImageBytes(name string, data []byte) (string, error) {
 	return mime, nil
 }
 
+// 检查待上传附件的可读性、体积上限与 Files API 上传规格（仅读取前 8 KiB 做内容嗅探）
+func inspectAttachmentFile(path string, richLayout bool) (name string, size int64, spec apis.FileUploadSpec, err error) {
+	cleaned := strings.TrimSpace(path)
+	name = filepath.Base(strings.ReplaceAll(cleaned, "\\", "/"))
+	f, err := os.Open(cleaned)
+	if err != nil {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("打开文件 %q 失败: %w", name, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("读取文件 %q 信息失败: %w", name, err)
+	}
+	if info.IsDir() {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("%q 是目录，不能作为附件上传", name)
+	}
+	if info.Size() == 0 {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("文件 %q 为空文件", name)
+	}
+
+	head := make([]byte, fileSniffReadBytes)
+	n, readErr := f.Read(head)
+	if readErr != nil && readErr != io.EOF {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("读取文件 %q 失败: %w", name, readErr)
+	}
+	spec, err = apis.ResolveFileUploadSpec(name, head[:n], richLayout)
+	if err != nil {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("文件 %q: %w", name, err)
+	}
+	if info.Size() > spec.MaxBytes {
+		return "", 0, apis.FileUploadSpec{}, fmt.Errorf("文件 %q 超过大小上限（%d MiB）", name, spec.MaxBytes>>20)
+	}
+	return name, info.Size(), spec, nil
+}
+
+func isImageFileName(name string) bool {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(name))) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func fileExtBadge(name string) string {
+	ext := strings.TrimPrefix(strings.ToUpper(filepath.Ext(strings.TrimSpace(name))), ".")
+	if ext == "" {
+		return "TXT"
+	}
+	if len(ext) > 5 {
+		return ext[:5]
+	}
+	return ext
+}
+
+func formatByteSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
+}
+
 // 筛选剪贴板文件列表中扩展名属于常见图片的路径
 // 用于粘贴文件时区分“复制了图片文件”和“复制了普通代码/文档文件”
 func filterSupportedImagePaths(paths []string) []string {
 	var out []string
 	for _, p := range paths {
-		switch strings.ToLower(filepath.Ext(strings.TrimSpace(p))) {
-		case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		if isImageFileName(p) {
 			out = append(out, p)
 		}
 	}

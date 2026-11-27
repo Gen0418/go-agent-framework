@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 const (
@@ -16,7 +17,28 @@ const (
 	MaxImageRequestBytes = 48 << 20
 )
 
-// DetectImageMIME 按文件内容魔数识别支持的图片格式及对应扩展名
+// Chat Completions 请求中的单条消息线格式（Content 可为纯文本或多模态块数组）
+type requestMessage struct {
+	Role             string     `json:"role"`
+	Content          any        `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+}
+
+type contentBlock struct {
+	Type     string         `json:"type"`
+	Text     string         `json:"text,omitempty"`
+	ImageURL *imageURLBlock `json:"image_url,omitempty"`
+	FileID   string         `json:"file_id,omitempty"`
+}
+
+type imageURLBlock struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// DetectImageMIME 按文件内容识别支持的图片格式及对应扩展名
 // 仅接受 JPEG / PNG / GIF / WebP
 func DetectImageMIME(data []byte) (mime string, ext string, ok bool) {
 	if len(data) == 0 {
@@ -37,10 +59,11 @@ func DetectImageMIME(data []byte) (mime string, ext string, ok bool) {
 }
 
 // 将对话消息转换为协议层 requestMessage
-// 无图片时保持 content 为纯字符串，含图片时按需读盘编码为 OpenAI 兼容块数组
+// 无附件时保持 content 为纯字符串，含图片或文件时编码为 OpenAI/DeepSeek 兼容块数组
 func encodeRequestMessages(msgs []Message) ([]requestMessage, error) {
 	out := make([]requestMessage, len(msgs))
 	var totalEncoded int64
+	nowUnix := time.Now().Unix()
 
 	for i, msg := range msgs {
 		rm := requestMessage{
@@ -50,19 +73,32 @@ func encodeRequestMessages(msgs []Message) ([]requestMessage, error) {
 			ToolCalls:        msg.ToolCalls,
 			ToolCallID:       msg.ToolCallID,
 		}
-		if len(msg.Images) == 0 {
+		if len(msg.Images) == 0 && len(msg.Files) == 0 {
 			out[i] = rm
 			continue
 		}
 		if msg.Role != "user" {
-			return nil, fmt.Errorf("仅 user 消息支持附带图片，当前角色为 %q", msg.Role)
+			return nil, fmt.Errorf("仅 user 消息支持附带图片或文件，当前角色为 %q", msg.Role)
 		}
 
-		blocks := make([]contentBlock, 0, len(msg.Images)+1)
+		blocks := make([]contentBlock, 0, len(msg.Images)+len(msg.Files)+1)
 		if msg.Content != "" {
 			blocks = append(blocks, contentBlock{
 				Type: "text",
 				Text: msg.Content,
+			})
+		}
+		for _, file := range msg.Files {
+			fileID := strings.TrimSpace(file.FileID)
+			if fileID == "" {
+				return nil, fmt.Errorf("文件附件 %q 缺少 file_id，请等待上传完成或重新上传", displayFileName(file))
+			}
+			if file.ExpiresAt > 0 && nowUnix >= file.ExpiresAt {
+				return nil, fmt.Errorf("文件附件 %q 的云端文件已过期，请重新上传后再发送", displayFileName(file))
+			}
+			blocks = append(blocks, contentBlock{
+				Type:   "file",
+				FileID: fileID,
 			})
 		}
 		for _, img := range msg.Images {

@@ -7,7 +7,25 @@ import (
 	"time"
 )
 
-const defaultBaseURL = "https://api.deepseek.com"
+const (
+	defaultBaseURL   = "https://api.deepseek.com"
+	thinkingEnabled  = "enabled"
+	thinkingDisabled = "disabled"
+)
+
+type enableThinking struct {
+	Type string `json:"type"` // "enabled" / "disabled"
+}
+
+// Chat Completions 协议层请求体
+type chatRequest struct {
+	Model           string           `json:"model"`
+	Messages        []requestMessage `json:"messages"`
+	Stream          bool             `json:"stream"`
+	Thinking        *enableThinking  `json:"thinking,omitzero"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	Tools           []Tool           `json:"tools,omitempty"`
+}
 
 // 模型接口客户端（HTTP 为空时复用默认连接池客户端）
 type Client struct {
@@ -26,7 +44,8 @@ func newDefaultHTTPClient() *http.Client {
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = base.Clone()
 	}
-	transport.ResponseHeaderTimeout = 60 * time.Second
+	// 文档同步解析上限可达 180s，适当放宽响应头等待时间；各接口仍由各自的 context.WithTimeout 精确控时
+	transport.ResponseHeaderTimeout = 200 * time.Second
 	return &http.Client{Transport: transport}
 }
 

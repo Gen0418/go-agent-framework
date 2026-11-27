@@ -48,10 +48,11 @@ type OutputEvent struct {
 	ToolCallID string
 }
 
-// TurnRequest 描述推进单轮对话所需的输入、图片附件、客户端、流式选项与回调
+// TurnRequest 描述推进单轮对话所需的输入、附件、客户端、流式选项与回调
 type TurnRequest struct {
 	Input   string
 	Images  []apis.Image
+	Files   []apis.File
 	Client  *apis.Client
 	Opts    apis.StreamOptions
 	WorkDir string // 为空时默认使用当前工作目录
@@ -121,6 +122,7 @@ func (l *Loop) RunTurn(ctx context.Context, req TurnRequest) error {
 		Role:    "user",
 		Content: req.Input,
 		Images:  slices.Clone(req.Images),
+		Files:   slices.Clone(req.Files),
 	}
 	if err := l.appendMessage(ctx, userMsg); err != nil {
 		return err

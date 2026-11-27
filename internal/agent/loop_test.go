@@ -780,3 +780,64 @@ func TestRunTurnWithImagesPersistsAndEncodesMultimodal(t *testing.T) {
 	}
 	assertHistory(t, loop, want)
 }
+
+func TestRunTurnWithFilesPersistsAndEncodesFileID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agent.db")
+	store, err := storage.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	loop := NewLoop(store, nil)
+	if err := loop.NewSession(t.Context(), "文档测试"); err != nil {
+		t.Fatal(err)
+	}
+
+	savedFile, err := store.SaveFile(t.Context(), loop.SessionID(), apis.File{
+		FileID:  "file-api-doc-99",
+		Name:    "report.pdf",
+		Purpose: apis.FilePurposeRichLayoutRecognition,
+	}, "", []byte("%PDF-1.7 test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedBody []byte
+	client := &apis.Client{
+		Endpoint: "https://api.deepseek.com/chat/completions",
+		APIKey:   "sk-test",
+		Model:    "deepseek-flash",
+		HTTP: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				capturedBody, _ = io.ReadAll(r.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(replyStream)),
+				}, nil
+			}),
+		},
+	}
+
+	if err := loop.RunTurn(t.Context(), TurnRequest{
+		Input:   "总结这份报告",
+		Files:   []apis.File{savedFile},
+		Client:  client,
+		Output:  discardOutput,
+		Confirm: unexpectedConfirm(t),
+	}); err != nil {
+		t.Fatalf("RunTurn 失败: %v", err)
+	}
+
+	bodyStr := string(capturedBody)
+	if !strings.Contains(bodyStr, `"type":"file"`) || !strings.Contains(bodyStr, `"file_id":"file-api-doc-99"`) || !strings.Contains(bodyStr, `"总结这份报告"`) {
+		t.Fatalf("发送请求体未按 file_id 块数组编码: %s", bodyStr)
+	}
+
+	want := []apis.Message{
+		{Role: "user", Content: "总结这份报告", Files: []apis.File{savedFile}},
+		{Role: "assistant", ReasoningContent: "思考", Content: "答复"},
+	}
+	assertHistory(t, loop, want)
+}

@@ -1,11 +1,14 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,7 +18,10 @@ import (
 	"go-agent-framework/internal/apis"
 )
 
-const attachmentsPicRel = "attachments/pic"
+const (
+	attachmentsPicRel  = "attachments/pic"
+	attachmentsFileRel = "attachments/file"
+)
 
 // SaveImage 校验并将图片二进制原子写入 attachments/pic/<sessionID>/ 目录
 // 返回携带可访问路径与标准元信息的 apis.Image，供消息发送与入库复用
@@ -63,6 +69,126 @@ func (s *Store) SaveImage(ctx context.Context, sessionID int64, name string, dat
 		Name: cleanAttachmentName(name, fileName),
 		Size: int64(len(data)),
 	}, nil
+}
+
+// SaveFile 将文件原件原子备份到 attachments/file/<sessionID>/ 目录
+// 支持从本地路径流式拷贝（srcPath）或内存字节（data）写入，返回更新了 Path/Name/Size 的 apis.File
+func (s *Store) SaveFile(ctx context.Context, sessionID int64, meta apis.File, srcPath string, data []byte) (apis.File, error) {
+	if sessionID <= 0 {
+		return apis.File{}, fmt.Errorf("无效会话编号: %d", sessionID)
+	}
+	if _, err := s.QuerySession(ctx, sessionID); err != nil {
+		return apis.File{}, fmt.Errorf("保存文件前校验会话 %d 失败: %w", sessionID, err)
+	}
+
+	srcPath = strings.TrimSpace(srcPath)
+	if srcPath == "" && len(data) == 0 {
+		return apis.File{}, errors.New("文件内容为空")
+	}
+
+	origName := strings.TrimSpace(meta.Name)
+	if origName == "" && srcPath != "" {
+		origName = filepath.Base(strings.ReplaceAll(srcPath, "\\", "/"))
+	}
+	ext := strings.ToLower(filepath.Ext(origName))
+	if ext == "" && srcPath != "" {
+		ext = strings.ToLower(filepath.Ext(srcPath))
+	}
+
+	var reader io.Reader
+	if srcPath != "" {
+		f, err := os.Open(srcPath)
+		if err != nil {
+			return apis.File{}, fmt.Errorf("打开源文件失败: %w", err)
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return apis.File{}, fmt.Errorf("读取源文件信息失败: %w", err)
+		}
+		if info.IsDir() {
+			return apis.File{}, errors.New("不能将目录保存为文件附件")
+		}
+		if info.Size() == 0 {
+			return apis.File{}, errors.New("文件内容为空")
+		}
+		if info.Size() > apis.MaxDocumentFileBytes {
+			return apis.File{}, fmt.Errorf("文件大小超过上限（%d MiB）", apis.MaxDocumentFileBytes>>20)
+		}
+		reader = f
+	} else {
+		if int64(len(data)) > apis.MaxDocumentFileBytes {
+			return apis.File{}, fmt.Errorf("文件大小超过上限（%d MiB）", apis.MaxDocumentFileBytes>>20)
+		}
+		reader = bytes.NewReader(data)
+	}
+
+	baseDir, err := s.ensureBaseDir()
+	if err != nil {
+		return apis.File{}, err
+	}
+
+	sessionDir := filepath.Join(baseDir, filepath.FromSlash(attachmentsFileRel), strconv.FormatInt(sessionID, 10))
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		return apis.File{}, fmt.Errorf("创建文件附件目录失败: %w", err)
+	}
+
+	fileName, err := newAttachmentFileName(ext)
+	if err != nil {
+		return apis.File{}, fmt.Errorf("生成附件文件名失败: %w", err)
+	}
+	fullPath := filepath.Join(sessionDir, fileName)
+	written, err := copyFileAtomic(sessionDir, fullPath, reader, apis.MaxDocumentFileBytes)
+	if err != nil {
+		return apis.File{}, fmt.Errorf("写入文件附件失败: %w", err)
+	}
+
+	out := meta
+	out.Path = fullPath
+	out.Name = cleanAttachmentName(origName, fileName)
+	out.Size = written
+	return out, nil
+}
+
+// ListSessionFileIDs 查询会话历史消息中关联的所有非空云端 file_id（去重）
+// 供删除会话时异步清理 DeepSeek 云端文件使用
+func (s *Store) ListSessionFileIDs(ctx context.Context, sessionID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT files FROM messages WHERE session_id = ? AND files != '[]' AND files != '';`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询会话 %d 文件列表失败: %w", sessionID, err)
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	var ids []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("扫描会话 %d 文件列表失败: %w", sessionID, err)
+		}
+		var files []apis.File
+		if err := json.Unmarshal([]byte(raw), &files); err != nil {
+			return nil, fmt.Errorf("解析会话 %d 文件记录失败: %w", sessionID, err)
+		}
+		for _, f := range files {
+			id := strings.TrimSpace(f.FileID)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历会话 %d 文件列表失败: %w", sessionID, err)
+	}
+	return ids, nil
 }
 
 func (s *Store) ensureBaseDir() (string, error) {
@@ -115,14 +241,46 @@ func (s *Store) fromStoredImages(imgs []apis.Image) []apis.Image {
 	return out
 }
 
+// 将文件路径归一化为相对 baseDir 的可移植路径存入数据库
+func (s *Store) toStoredFiles(files []apis.File) []apis.File {
+	baseDir := s.currentBaseDir()
+	out := make([]apis.File, len(files))
+	for i, f := range files {
+		out[i] = f
+		if baseDir != "" && f.Path != "" {
+			if rel, err := filepath.Rel(baseDir, f.Path); err == nil &&
+				rel != "" && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+				out[i].Path = filepath.ToSlash(rel)
+			}
+		}
+	}
+	return out
+}
+
+// 将数据库中存储的相对文件路径解析回当前 baseDir 下的实际文件路径
+func (s *Store) fromStoredFiles(files []apis.File) []apis.File {
+	baseDir := s.currentBaseDir()
+	out := make([]apis.File, len(files))
+	for i, f := range files {
+		out[i] = f
+		if baseDir != "" && f.Path != "" && !filepath.IsAbs(f.Path) {
+			out[i].Path = filepath.Join(baseDir, filepath.FromSlash(f.Path))
+		}
+	}
+	return out
+}
+
 func (s *Store) removeSessionAttachments(sessionID int64) error {
 	baseDir := s.currentBaseDir()
 	if baseDir == "" || sessionID <= 0 {
 		return nil
 	}
-	sessionDir := filepath.Join(baseDir, filepath.FromSlash(attachmentsPicRel), strconv.FormatInt(sessionID, 10))
-	if err := os.RemoveAll(sessionDir); err != nil {
-		return fmt.Errorf("清理会话 %d 图片附件目录失败: %w", sessionID, err)
+	sid := strconv.FormatInt(sessionID, 10)
+	for _, rel := range []string{attachmentsPicRel, attachmentsFileRel} {
+		sessionDir := filepath.Join(baseDir, filepath.FromSlash(rel), sid)
+		if err := os.RemoveAll(sessionDir); err != nil {
+			return fmt.Errorf("清理会话 %d 附件目录 %s 失败: %w", sessionID, rel, err)
+		}
 	}
 	return nil
 }
@@ -172,4 +330,44 @@ func writeFileAtomic(dir, target string, data []byte) error {
 	}
 	cleanup = false
 	return nil
+}
+
+func copyFileAtomic(dir, target string, r io.Reader, maxBytes int64) (int64, error) {
+	tmp, err := os.CreateTemp(dir, ".file-*.tmp")
+	if err != nil {
+		return 0, err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return 0, err
+	}
+	n, err := io.Copy(tmp, io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		_ = tmp.Close()
+		return 0, err
+	}
+	if n == 0 {
+		_ = tmp.Close()
+		return 0, errors.New("文件内容为空")
+	}
+	if n > maxBytes {
+		_ = tmp.Close()
+		return 0, fmt.Errorf("文件大小超过上限（%d MiB）", maxBytes>>20)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		return 0, err
+	}
+	cleanup = false
+	return n, nil
 }

@@ -1,6 +1,6 @@
 package apis
 
-// 请求
+// 核心对话领域模型（跨 storage / agent / tools / 交互层共享的数据契约）
 
 // Image 表示随用户消息发送的本地图片附件元数据
 // 持久化与内存中仅保存路径及元信息，发送请求时再按需读取编码为 data URL
@@ -12,23 +12,48 @@ type Image struct {
 	Detail string `json:"detail,omitempty"` // 可选："low" / "high" / "auto"
 }
 
+// File 表示通过 Files API 上传并在对话中按 file_id 引用的附件元数据
+// 本地同时保留备份路径供展示与系统打开，对话请求中仅发送轻量 file_id
+type File struct {
+	FileID    string `json:"file_id"`
+	Path      string `json:"path,omitempty"`
+	Name      string `json:"name"`
+	Purpose   string `json:"purpose,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
+}
+
 type Message struct {
 	Role             string     `json:"role"` // "system" / "user" / "assistant" / "tool"
 	Content          string     `json:"content"`
 	Images           []Image    `json:"images,omitempty"`
+	Files            []File     `json:"files,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
-type enableThinking struct {
-	Type string `json:"type"` // "enabled" / "disabled"
+type Tool struct {
+	Type     string      `json:"type"`
+	Function FunctionDef `json:"function"`
 }
 
-const (
-	thinkingEnabled  = "enabled"
-	thinkingDisabled = "disabled"
-)
+type FunctionDef struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name string `json:"name"`
+	Args string `json:"arguments"`
+}
 
 type StreamOptions struct {
 	Thinking        bool
@@ -60,64 +85,10 @@ func (k EventKind) String() string {
 	}
 }
 
-type Tool struct {
-	Type     string      `json:"type"`
-	Function FunctionDef `json:"function"`
-}
-
-type FunctionDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
-}
-
 // 流式事件
 type StreamEvent struct {
 	Kind         EventKind
 	Text         string
 	FinishReason string
 	ToolCalls    []ToolCall
-}
-
-type requestMessage struct {
-	Role             string     `json:"role"`
-	Content          any        `json:"content"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-}
-
-type contentBlock struct {
-	Type     string         `json:"type"`
-	Text     string         `json:"text,omitempty"`
-	ImageURL *imageURLBlock `json:"image_url,omitempty"`
-}
-
-type imageURLBlock struct {
-	URL    string `json:"url"`
-	Detail string `json:"detail,omitempty"`
-}
-
-type chatRequest struct {
-	Model           string           `json:"model"`
-	Messages        []requestMessage `json:"messages"`
-	Stream          bool             `json:"stream"`
-	Thinking        *enableThinking  `json:"thinking,omitzero"`
-	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
-	Tools           []Tool           `json:"tools,omitempty"`
-}
-
-// 响应
-
-type delta struct {
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	ReasoningContent string          `json:"reasoning_content"`
-	ToolCalls        []toolCallDelta `json:"tool_calls"`
-}
-type chatResponseChunk struct {
-	Choices []struct {
-		Delta        delta  `json:"delta"`
-		FinishReason string `json:"finish_reason"` // ""表示流尚未结束
-	} `json:"choices"`
 }

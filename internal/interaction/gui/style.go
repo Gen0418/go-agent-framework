@@ -216,16 +216,41 @@ func dangerBanner(c *ui.Context, msg string, onDismiss func()) {
 }
 
 // 用户消息右对齐气泡
-// 支持纯文本、纯图片及图文混排，缩略图点击可打开系统预览，文字支持划词复制
-func userBubble(c *ui.Context, text string, images []apis.Image, thumbFn func(apis.Image) *ui.Bitmap, onOpenImage func(apis.Image)) {
+// 支持纯文本、剪贴板图片、云端文件附件及图文混排，缩略图与文档卡片点击可调用系统打开
+func userBubble(
+	c *ui.Context,
+	text string,
+	images []apis.Image,
+	files []apis.File,
+	thumbForPath func(path string) *ui.Bitmap,
+	onOpenPath func(path string),
+) {
 	t := c.Theme()
+	var imgThumbs []apis.Image
+	imgThumbs = append(imgThumbs, images...)
+	var docFiles []apis.File
+	for _, f := range files {
+		if isImageFileName(f.Name) && strings.TrimSpace(f.Path) != "" {
+			imgThumbs = append(imgThumbs, apis.Image{Path: f.Path, Name: f.Name, Size: f.Size})
+		} else {
+			docFiles = append(docFiles, f)
+		}
+	}
+
 	ui.Row(c).FillWidth().Children(func() {
 		ui.Spacer(c)
 		ui.Column(c).AlignItems(ui.End).Gap(6).MaxWidthPercent(78).MaxWidth(540).Children(func() {
-			if len(images) > 0 {
+			if len(imgThumbs) > 0 {
 				ui.Row(c).Wrap().Justify(ui.End).Gap(6).Children(func() {
-					for i, img := range images {
-						renderHistoryImageThumb(c, i, img, thumbFn, onOpenImage)
+					for i, img := range imgThumbs {
+						renderHistoryImageThumb(c, i, img, thumbForPath, onOpenPath)
+					}
+				})
+			}
+			if len(docFiles) > 0 {
+				ui.Row(c).Wrap().Justify(ui.End).Gap(6).Children(func() {
+					for i, f := range docFiles {
+						renderHistoryFileCard(c, i, f, onOpenPath)
 					}
 				})
 			}
@@ -242,15 +267,15 @@ func userBubble(c *ui.Context, text string, images []apis.Image, thumbFn func(ap
 	})
 }
 
-func renderHistoryImageThumb(c *ui.Context, idx int, img apis.Image, thumbFn func(apis.Image) *ui.Bitmap, onOpenImage func(apis.Image)) {
+func renderHistoryImageThumb(c *ui.Context, idx int, img apis.Image, thumbForPath func(string) *ui.Bitmap, onOpenPath func(string)) {
 	t := c.Theme()
 	name := strings.TrimSpace(img.Name)
 	if name == "" {
 		name = fmt.Sprintf("图片 %d", idx+1)
 	}
 	var bmp *ui.Bitmap
-	if thumbFn != nil {
-		bmp = thumbFn(img)
+	if thumbForPath != nil {
+		bmp = thumbForPath(img.Path)
 	}
 
 	tile := ui.ButtonBase(c.Key(fmt.Sprintf("%d:%s", idx, img.Path))).
@@ -273,58 +298,254 @@ func renderHistoryImageThumb(c *ui.Context, idx int, img apis.Image, thumbFn fun
 			ui.Text(c, name).FontSize(11).TextColor(t.TextMuted).MaxLines(2).TextAlign(ui.Center)
 		})
 	})
-	if tile.Clicked() && onOpenImage != nil {
-		onOpenImage(img)
+	if tile.Clicked() && onOpenPath != nil {
+		onOpenPath(img.Path)
 	}
 }
 
-// 输入区待发送图片缩略图预览条
-// 多图时自动换行并限制最大高度，支持点击右上角 × 移除单张附件
-func pendingImageStrip(c *ui.Context, images []pendingImage, thumbFn func(pendingImage) *ui.Bitmap, onRemove func(id int64)) {
+func renderHistoryFileCard(c *ui.Context, idx int, file apis.File, onOpenPath func(string)) {
 	t := c.Theme()
-	ui.Scroll(c).MaxHeight(136).FillWidth().Children(func() {
-		ui.Row(c).FillWidth().Wrap().Gap(8).Children(func() {
-			for _, img := range images {
-				var bmp *ui.Bitmap
-				if thumbFn != nil {
-					bmp = thumbFn(img)
-				}
-				ui.Box(c.Key(img.id)).
-					Size(64, 64).
-					Radius(8).
-					Background(t.Background).
-					Border(1, t.Border).
-					Children(func() {
-						if bmp != nil {
-							ui.Image(c, bmp).Fill().Fit(ui.Cover).Radius(7).Label(img.name)
-						} else {
-							ui.Column(c).Fill().Center().Padding(4).Children(func() {
-								ui.Text(c, img.name).FontSize(10).TextColor(t.TextMuted).MaxLines(2).TextAlign(ui.Center)
-							})
-						}
-						rm := ui.ButtonBase(c).
-							Attach(ui.AnchorTopEnd, ui.AnchorTopEnd).
-							Top(2).
-							End(2).
-							Size(18, 18).
-							Center().
-							Radius(999).
-							Background(ui.RGBA(0, 0, 0, 0.62)).
-							Label("移除图片 " + img.name).
-							Tooltip("移除 " + img.name)
-						if rm.Hovered() {
-							rm.Background(t.Danger)
-						}
-						rm.Children(func() {
-							ui.Text(c, "×").FontSize(11).TextColor(ui.Hex("#ffffff"))
-						})
-						if rm.Clicked() && onRemove != nil {
-							onRemove(img.id)
-						}
-					})
+	name := strings.TrimSpace(file.Name)
+	if name == "" {
+		name = fmt.Sprintf("文件 %d", idx+1)
+	}
+	sub := formatFileSubtitle(file.Size, file.Purpose)
+	card := ui.ButtonBase(c.Key(fmt.Sprintf("file:%d:%s", idx, file.FileID))).
+		MaxWidth(260).
+		Padding(8, 12).
+		Gap(8).
+		AlignItems(ui.Center).
+		Radius(10).
+		Background(t.Surface).
+		Border(1, t.Border).
+		Label("打开文件 " + name).
+		Tooltip(name)
+	if card.Hovered() && strings.TrimSpace(file.Path) != "" {
+		card.Border(1, t.Text.Alpha(0.35))
+	}
+	card.Children(func() {
+		pill(c, fileExtBadge(name), t.TextMuted, t.Background)
+		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
+			ui.Text(c, name).FontSize(12).FontWeight(500).SingleLine().MinWidth(0)
+			if sub != "" {
+				ui.Text(c, sub).FontSize(11).TextColor(t.TextMuted).SingleLine().MinWidth(0)
 			}
 		})
 	})
+	if card.Clicked() && onOpenPath != nil && strings.TrimSpace(file.Path) != "" {
+		onOpenPath(file.Path)
+	}
+}
+
+func formatFileSubtitle(size int64, purpose string) string {
+	var parts []string
+	if size > 0 {
+		parts = append(parts, formatByteSize(size))
+	}
+	switch purpose {
+	case apis.FilePurposeRichLayoutRecognition:
+		parts = append(parts, "含图表识别")
+	case apis.FilePurposeTextRecognition:
+		parts = append(parts, "纯文本识别")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// 输入区待发送附件预览条（同时展示剪贴板图片缩略图与 Files API 预上传文件卡片）
+// 多附件时自动换行并限制最大高度，支持查看上传进度、失败重试与点击 × 移除
+func pendingAttachmentStrip(
+	c *ui.Context,
+	images []pendingImage,
+	files []*pendingFile,
+	thumbForPending func(pendingImage) *ui.Bitmap,
+	thumbForPath func(path string) *ui.Bitmap,
+	onRemoveImage func(id int64),
+	onRemoveFile func(id int64),
+	onRetryFile func(id int64),
+) {
+	t := c.Theme()
+	var removeImageID, removeFileID, retryFileID int64
+	ui.Scroll(c).MaxHeight(140).FillWidth().Children(func() {
+		ui.Row(c).FillWidth().Wrap().Gap(8).Children(func() {
+			for _, img := range images {
+				renderPendingImageTile(c, img, thumbForPending, func(id int64) {
+					removeImageID = id
+				})
+			}
+			for _, f := range files {
+				if f == nil {
+					continue
+				}
+				renderPendingFileChip(c, t, f, thumbForPath, func(id int64) {
+					removeFileID = id
+				}, func(id int64) {
+					retryFileID = id
+				})
+			}
+		})
+	})
+	if removeImageID != 0 && onRemoveImage != nil {
+		onRemoveImage(removeImageID)
+	}
+	if removeFileID != 0 && onRemoveFile != nil {
+		onRemoveFile(removeFileID)
+	}
+	if retryFileID != 0 && onRetryFile != nil {
+		onRetryFile(retryFileID)
+	}
+}
+
+func renderPendingImageTile(c *ui.Context, img pendingImage, thumbFn func(pendingImage) *ui.Bitmap, onRemove func(id int64)) {
+	t := c.Theme()
+	var bmp *ui.Bitmap
+	if thumbFn != nil {
+		bmp = thumbFn(img)
+	}
+	ui.Box(c.Key(fmt.Sprintf("pimg:%d", img.id))).
+		Size(64, 64).
+		Radius(8).
+		Background(t.Background).
+		Border(1, t.Border).
+		Children(func() {
+			if bmp != nil {
+				ui.Image(c, bmp).Fill().Fit(ui.Cover).Radius(7).Label(img.name)
+			} else {
+				ui.Column(c).Fill().Center().Padding(4).Children(func() {
+					ui.Text(c, img.name).FontSize(10).TextColor(t.TextMuted).MaxLines(2).TextAlign(ui.Center)
+				})
+			}
+			renderThumbCloseButton(c, "移除图片 "+img.name, "移除 "+img.name, func() {
+				if onRemove != nil {
+					onRemove(img.id)
+				}
+			})
+		})
+}
+
+func renderPendingFileChip(
+	c *ui.Context,
+	t *ui.Theme,
+	f *pendingFile,
+	thumbForPath func(string) *ui.Bitmap,
+	onRemove func(id int64),
+	onRetry func(id int64),
+) {
+	// 图片附件在上传中/就绪时采用 64×64 缩略图样式，失败时展开卡片方便展示错误与重试
+	if f.isImage && f.status != fileFailed {
+		var bmp *ui.Bitmap
+		if thumbForPath != nil {
+			bmp = thumbForPath(f.srcPath)
+		}
+		ui.Box(c.Key(fmt.Sprintf("pfile:%d", f.id))).
+			Size(64, 64).
+			Radius(8).
+			Background(t.Background).
+			Border(1, t.Border).
+			Children(func() {
+				if bmp != nil {
+					ui.Image(c, bmp).Fill().Fit(ui.Cover).Radius(7).Label(f.name)
+				} else {
+					ui.Column(c).Fill().Center().Padding(4).Children(func() {
+						ui.Text(c, f.name).FontSize(10).TextColor(t.TextMuted).MaxLines(2).TextAlign(ui.Center)
+					})
+				}
+				if f.status == fileUploading {
+					ui.Box(c).Fill().Center().Radius(7).Background(ui.RGBA(0, 0, 0, 0.45)).Children(func() {
+						ui.Spinner(c).Size(16, 16).Label("上传中 " + f.name)
+					})
+				}
+				renderThumbCloseButton(c, "移除附件 "+f.name, "移除 "+f.name, func() {
+					if onRemove != nil {
+						onRemove(f.id)
+					}
+				})
+			})
+		return
+	}
+
+	border := t.Border
+	bg := t.Background
+	if f.status == fileFailed {
+		border = t.Danger.Alpha(0.5)
+		bg = t.Danger.Alpha(0.06)
+	}
+	ui.Row(c.Key(fmt.Sprintf("pfile:%d", f.id))).
+		MaxWidth(280).
+		Padding(6, 10).
+		Gap(8).
+		AlignItems(ui.Center).
+		Radius(10).
+		Background(bg).
+		Border(1, border).
+		Children(func() {
+			if f.status == fileUploading {
+				ui.Spinner(c).Size(14, 14).Label("上传中 " + f.name).Shrink(0)
+			} else {
+				pill(c, fileExtBadge(f.name), t.TextMuted, t.Surface)
+			}
+			ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
+				ui.Text(c, f.name).FontSize(12).FontWeight(500).SingleLine().MinWidth(0)
+				switch f.status {
+				case fileUploading:
+					ui.Text(c, "上传解析中…").FontSize(11).TextColor(t.TextMuted).SingleLine().MinWidth(0)
+				case fileFailed:
+					msg := strings.TrimSpace(f.errMsg)
+					if msg == "" {
+						msg = "上传失败"
+					}
+					ui.Text(c, msg).FontSize(11).TextColor(t.Danger).SingleLine().MinWidth(0)
+				default:
+					if sub := formatFileSubtitle(f.size, f.purpose); sub != "" {
+						ui.Text(c, sub).FontSize(11).TextColor(t.TextMuted).SingleLine().MinWidth(0)
+					}
+				}
+			})
+			if f.status == fileFailed && onRetry != nil {
+				retryBtn := ui.ButtonBase(c).Padding(2, 6).Radius(6).Shrink(0).Label("重试上传 " + f.name)
+				if retryBtn.Hovered() {
+					retryBtn.Background(t.SurfaceHover)
+				}
+				retryBtn.Children(func() {
+					ui.Text(c, "重试").FontSize(11).TextColor(t.Text).SingleLine()
+				})
+				if retryBtn.Clicked() {
+					onRetry(f.id)
+				}
+			}
+			rmBtn := ui.ButtonBase(c).Size(20, 20).Center().Radius(4).Shrink(0).Label("移除附件 " + f.name).Tooltip("移除 " + f.name)
+			if rmBtn.Hovered() {
+				rmBtn.Background(t.SurfaceHover)
+			}
+			rmBtn.Children(func() {
+				ui.Text(c, "×").FontSize(12).TextColor(t.TextMuted)
+			})
+			if rmBtn.Clicked() && onRemove != nil {
+				onRemove(f.id)
+			}
+		})
+}
+
+func renderThumbCloseButton(c *ui.Context, label, tooltip string, onClick func()) {
+	t := c.Theme()
+	rm := ui.ButtonBase(c).
+		Attach(ui.AnchorTopEnd, ui.AnchorTopEnd).
+		Top(2).
+		End(2).
+		Size(18, 18).
+		Center().
+		Radius(999).
+		Background(ui.RGBA(0, 0, 0, 0.62)).
+		Label(label).
+		Tooltip(tooltip)
+	if rm.Hovered() {
+		rm.Background(t.Danger)
+	}
+	rm.Children(func() {
+		ui.Text(c, "×").FontSize(11).TextColor(ui.Hex("#ffffff"))
+	})
+	if rm.Clicked() && onClick != nil {
+		onClick()
+	}
 }
 
 // 思考过程可折叠卡片

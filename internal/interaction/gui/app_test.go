@@ -11,12 +11,15 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,12 +102,21 @@ func TestSessionOptsPopover(t *testing.T) {
 		t.Fatalf("重新开启本地命令后 Tools = %+v，预期仅恢复 bash", s1.opts.Tools)
 	}
 
+	// 文档解析默认关闭图表识别（纯文本模式），开启后仅影响当前会话
+	if s1.docRichLayout {
+		t.Fatal("新会话默认应关闭识别文档图表")
+	}
+	mustClick(t, tt, "识别文档图表")
+	if !s1.docRichLayout {
+		t.Fatal("点击勾选识别文档图表后应开启图表识别模式")
+	}
+
 	// 切换到会话2，选项不受会话1影响
 	a.sessions.selectedID = 2
 	tt.Frame()
 	s2 := a.sessionState(2)
-	if !s2.opts.Thinking || s2.opts.ReasoningEffort != "low" || len(s2.opts.Tools) != 3 {
-		t.Fatalf("会话2 选项不应受会话1 影响: %+v", s2.opts)
+	if !s2.opts.Thinking || s2.opts.ReasoningEffort != "low" || len(s2.opts.Tools) != 3 || s2.docRichLayout {
+		t.Fatalf("会话2 选项不应受会话1 影响: opts=%+v docRichLayout=%v", s2.opts, s2.docRichLayout)
 	}
 }
 
@@ -564,14 +576,14 @@ func TestComposerKeyboardAndConfirmCard(t *testing.T) {
 	stopped := false
 	decided := []bool{}
 
-	draft := ""
-	opts := apis.StreamOptions{
-		Thinking:        true,
-		ReasoningEffort: "low",
-		Tools:           []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}},
+	state := &sessionState{
+		opts: apis.StreamOptions{
+			Thinking:        true,
+			ReasoningEffort: "low",
+			Tools:           []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}},
+		},
 	}
 	var pop optsPopover
-	running := false
 	confirm := &confirmToolCall{dir: "/workspace", command: "ls -la"}
 
 	view := func(c *ui.Context) {
@@ -584,17 +596,14 @@ func TestComposerKeyboardAndConfirmCard(t *testing.T) {
 				})
 			}
 			renderComposer(c, composerProps{
-				sessionID:     1,
-				inputText:     &draft,
-				model:         "deepseek-chat",
-				opts:          &opts,
-				hasLocalTools: true,
-				localToolsOn:  true,
-				optsPopover:   &pop,
-				running:       running,
+				sessionID:   1,
+				model:       "deepseek-chat",
+				state:       state,
+				optsPopover: &pop,
+				toolToggles: []optionToggle{{label: "允许本地命令", checked: true}},
 				onSubmit: func(text string) {
 					submitted = append(submitted, text)
-					draft = ""
+					state.inputText = ""
 				},
 				onStop: func() {
 					stopped = true
@@ -624,17 +633,17 @@ func TestComposerKeyboardAndConfirmCard(t *testing.T) {
 	tt.Type("第一行")
 	tt.Key(ui.Shift, ui.KeyEnter)
 	tt.Type("第二行")
-	if len(submitted) != 0 || draft != "第一行\n第二行" {
-		t.Fatalf("Shift+Enter 不应提交: submitted=%q, draft=%q", submitted, draft)
+	if len(submitted) != 0 || state.inputText != "第一行\n第二行" {
+		t.Fatalf("Shift+Enter 不应提交: submitted=%q, draft=%q", submitted, state.inputText)
 	}
 
 	tt.Key(0, ui.KeyEnter)
-	if len(submitted) != 1 || submitted[0] != "第一行\n第二行" || draft != "" {
-		t.Fatalf("Enter 应提交并清空草稿: submitted=%q, draft=%q", submitted, draft)
+	if len(submitted) != 1 || submitted[0] != "第一行\n第二行" || state.inputText != "" {
+		t.Fatalf("Enter 应提交并清空草稿: submitted=%q, draft=%q", submitted, state.inputText)
 	}
 
 	// 运行态切换为“停止”按钮并响应点击
-	running = true
+	state.running = true
 	tt.Frame()
 	tt.Click("停止")
 	if !stopped {
@@ -1002,75 +1011,140 @@ func TestGUIImagePickerPasteDropAndRemove(t *testing.T) {
 
 	shotPath := filepath.Join(dir, "shot.png")
 	dropPath := filepath.Join(dir, "photo.jpg")
-	badPath := filepath.Join(dir, "fake.png")
+	badPath := filepath.Join(dir, "archive.bin")
 	for path, data := range map[string][]byte{
 		shotPath: pngBytes,
 		dropPath: jpgBytes,
-		badPath:  []byte("not a real image"),
+		badPath:  {0x00, 0x01, 0x02, 0xff, 0xfe},
 	} {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 
+	uiCh := make(chan func(), 32)
+	deletedCh := make(chan string, 8)
+	var uploadSeq int
+	var mu sync.Mutex
 	a := &app{
-		cfg: config.Config{DefaultModel: "deepseek-flash"},
+		ctx:      t.Context(),
+		dispatch: func(fn func()) { uiCh <- fn },
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodDelete {
+					deletedCh <- filepath.Base(r.URL.Path)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"deleted":true}`)),
+					}, nil
+				}
+				mu.Lock()
+				uploadSeq++
+				id := fmt.Sprintf("file-api-%d", uploadSeq)
+				mu.Unlock()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(fmt.Sprintf(`{"id":%q,"bytes":128,"expires_at":%d}`, id, time.Now().Add(24*time.Hour).Unix()))),
+				}, nil
+			}),
+		},
+		cfg: config.Config{
+			APIKey:       "sk-test",
+			Endpoint:     "https://api.deepseek.com/chat/completions",
+			DefaultModel: "deepseek-flash",
+		},
 		sessions: sessionList{
-			list:       []storage.Session{{ID: 1, Title: "图片输入测试"}},
+			list:       []storage.Session{{ID: 1, Title: "附件输入测试"}},
 			selectedID: 1,
 		},
 		sessionStates: map[int64]*sessionState{
 			1: {historyLoaded: true},
 		},
-		pickImages: func(cb func([]string, error)) {
+		pickFiles: func(cb func([]string, error)) {
 			cb([]string{shotPath, badPath}, nil)
 		},
+	}
+
+	drainUploads := func(wantReady int) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			ready := 0
+			for _, pf := range a.sessionState(1).pendingFiles {
+				if pf.status == fileReady {
+					ready++
+				}
+			}
+			if ready >= wantReady {
+				return
+			}
+			select {
+			case fn := <-uiCh:
+				fn()
+			case <-deadline:
+				t.Fatalf("等待附件预上传就绪超时，want=%d got=%d", wantReady, ready)
+			}
+		}
 	}
 
 	tt := ui.NewTester(a.view, 960, 640)
 	state := a.sessionState(1)
 
-	// 1. 点击“+ 图片”选择混合有效/无效文件：保留合法图片，同时在横幅提示无效文件错误
-	mustClick(t, tt, "添加图片")
-	if len(state.pendingImages) != 1 || state.pendingImages[0].name != "shot.png" {
-		t.Fatalf("选图后 pendingImages = %+v，预期仅包含 shot.png", state.pendingImages)
+	// 1. 点击“+ 附件”选择混合有效图片与无效二进制文件：合法文件进入预上传队列，无效二进制报错
+	mustClick(t, tt, "添加附件")
+	if len(state.pendingFiles) != 1 || state.pendingFiles[0].name != "shot.png" || !state.pendingFiles[0].isImage {
+		t.Fatalf("选附件后 pendingFiles = %+v，预期仅包含 shot.png", state.pendingFiles)
 	}
-	if state.err == nil || !strings.Contains(state.err.Error(), "fake.png") {
-		t.Fatalf("无效图片应报错提示 fake.png，实际 err = %v", state.err)
+	if state.err == nil || !strings.Contains(state.err.Error(), "archive.bin") {
+		t.Fatalf("不支持的二进制文件应报错提示 archive.bin，实际 err = %v", state.err)
 	}
+	drainUploads(1)
+	shotFileID := state.pendingFiles[0].fileID
 
-	// 2. 聚焦输入框并 Cmd/Ctrl+V 粘贴截图 PNG：新增草稿图片且不往输入框写乱码
+	// 2. 聚焦输入框并 Cmd/Ctrl+V 粘贴截图 PNG：继续走剪贴板 Base64 草稿（pendingImages），不走预上传
 	mustClick(t, tt, "消息输入框")
 	tt.SetClipboardData(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, pngBytes))))
 	tt.Key(ui.Cmd, ui.KeyV)
-	if len(state.pendingImages) != 2 || state.pendingImages[1].name != "粘贴图片.png" {
+	if len(state.pendingImages) != 1 || state.pendingImages[0].name != "粘贴图片.png" {
 		t.Fatalf("粘贴截图后 pendingImages = %+v，预期新增粘贴图片.png", state.pendingImages)
 	}
 
 	// 3. 普通文本粘贴仍正常进入输入框，不误触发图片附件
-	tt.SetClipboard("帮我看看这两张图")
+	tt.SetClipboard("帮我看看这些附件")
 	tt.Key(ui.Cmd, ui.KeyV)
-	if state.inputText != "帮我看看这两张图" || len(state.pendingImages) != 2 {
+	if state.inputText != "帮我看看这些附件" || len(state.pendingImages) != 1 {
 		t.Fatalf("普通文本粘贴异常: input=%q, images=%d", state.inputText, len(state.pendingImages))
 	}
 
-	// 4. 拖拽 JPEG 文件到聊天区：自动追加到待发图片预览条
+	// 4. 拖拽 JPEG 文件到聊天区：进入 Files API 预上传草稿队列
 	if !tt.DropFiles(600, 260, dropPath) {
 		t.Fatal("聊天区应接受拖入文件")
 	}
-	if len(state.pendingImages) != 3 || state.pendingImages[2].name != "photo.jpg" {
-		t.Fatalf("拖入图片后 pendingImages = %+v，预期新增 photo.jpg", state.pendingImages)
+	if len(state.pendingFiles) != 2 || state.pendingFiles[1].name != "photo.jpg" {
+		t.Fatalf("拖入文件后 pendingFiles = %+v，预期新增 photo.jpg", state.pendingFiles)
+	}
+	drainUploads(2)
+	tt.Frame()
+
+	// 5. 移除已预上传的 shot.png：从草稿移除并异步清理云端文件；移除粘贴图片不影响文件草稿
+	mustClick(t, tt, "移除附件 shot.png")
+	if len(state.pendingFiles) != 1 || state.pendingFiles[0].name != "photo.jpg" {
+		t.Fatalf("移除 shot.png 后应仅剩 photo.jpg，实际 = %+v", state.pendingFiles)
+	}
+	select {
+	case delID := <-deletedCh:
+		if delID != shotFileID {
+			t.Fatalf("移除附件触发删除的云端 file_id = %q，预期 %q", delID, shotFileID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("移除已就绪附件后未触发云端 DELETE 清理")
 	}
 
-	// 5. 点击缩略图右上角 × 移除 shot.png
-	mustClick(t, tt, "移除图片 shot.png")
-	if len(state.pendingImages) != 2 {
-		t.Fatalf("移除 shot.png 后应剩余 2 张图，实际 = %d", len(state.pendingImages))
-	}
-	for _, img := range state.pendingImages {
-		if img.name == "shot.png" {
-			t.Fatal("shot.png 未被移除")
-		}
+	mustClick(t, tt, "移除图片 粘贴图片.png")
+	if len(state.pendingImages) != 0 {
+		t.Fatalf("移除粘贴图片后 pendingImages 应为空，实际 = %d", len(state.pendingImages))
 	}
 }
 
@@ -1170,9 +1244,302 @@ func TestGUIImageOnlySubmitAndHistoryThumbnails(t *testing.T) {
 	if err := os.Remove(savedPath); err != nil {
 		t.Fatal(err)
 	}
-	a.thumbs.evict("file:" + savedPath)
+	a.thumbs.evict(pathThumbKey(savedPath, historyThumbMaxSide))
 	tt.Frame()
 	if !tt.HasText("图片不可用") {
 		t.Fatalf("缺失图片文件时应展示兜底占位，当前文本: %q", tt.Texts())
+	}
+}
+
+func TestGUIFilePreUploadRetryToggleSubmitAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agent.db")
+	cfgPath := filepath.Join(dir, "config.json")
+	store, err := storage.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	pdfPath := filepath.Join(dir, "report.pdf")
+	notesPath := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(pdfPath, []byte("%PDF-1.7 mock report content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notesPath, []byte("hello plain text attachment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type uploadRecord struct {
+		auth       string
+		purpose    string
+		filename   string
+		anchor     string
+		seconds    string
+		fieldOrder []string
+	}
+
+	var mu sync.Mutex
+	var uploads []uploadRecord
+	var chatBody []byte
+	var openedPaths []string
+	deletedCh := make(chan struct{ auth, id string }, 16)
+	firstUploadStarted := make(chan struct{})
+	releaseFirstUpload := make(chan struct{})
+	uploadCount := 0
+
+	uiCh := make(chan func(), 64)
+	a := &app{
+		ctx:      t.Context(),
+		store:    store,
+		cfgPath:  cfgPath,
+		dispatch: func(fn func()) { uiCh <- fn },
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch {
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/files"):
+					_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+					if err != nil {
+						return nil, err
+					}
+					mr := multipart.NewReader(r.Body, params["boundary"])
+					rec := uploadRecord{auth: r.Header.Get("Authorization")}
+					for {
+						part, err := mr.NextPart()
+						if err == io.EOF {
+							break
+						}
+						if err != nil {
+							return nil, err
+						}
+						rec.fieldOrder = append(rec.fieldOrder, part.FormName())
+						val, _ := io.ReadAll(part)
+						switch part.FormName() {
+						case "purpose":
+							rec.purpose = string(val)
+						case "expires_after[anchor]":
+							rec.anchor = string(val)
+						case "expires_after[seconds]":
+							rec.seconds = string(val)
+						case "file":
+							rec.filename = part.FileName()
+						}
+					}
+					mu.Lock()
+					uploadCount++
+					n := uploadCount
+					uploads = append(uploads, rec)
+					mu.Unlock()
+
+					if n == 1 {
+						close(firstUploadStarted)
+						<-releaseFirstUpload
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Header:     http.Header{"Content-Type": []string{"application/json"}},
+							Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"临时解析故障"}}`)),
+						}, nil
+					}
+					id := fmt.Sprintf("file-api-%d", n)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(strings.NewReader(fmt.Sprintf(
+							`{"id":%q,"bytes":%d,"expires_at":%d}`,
+							id, 28, time.Now().Add(30*24*time.Hour).Unix(),
+						))),
+					}, nil
+
+				case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/files/"):
+					deletedCh <- struct{ auth, id string }{
+						auth: r.Header.Get("Authorization"),
+						id:   filepath.Base(r.URL.Path),
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"deleted":true}`)),
+					}, nil
+
+				default:
+					body, _ := io.ReadAll(r.Body)
+					mu.Lock()
+					chatBody = body
+					mu.Unlock()
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+						Body: io.NopCloser(strings.NewReader(
+							"data: " + `{"choices":[{"delta":{"content":"已阅读报告内容"}}]}` + "\n\n" +
+								"data: " + `{"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+								"data: [DONE]\n\n",
+						)),
+					}, nil
+				}
+			}),
+		},
+		openPath: func(path string) error {
+			openedPaths = append(openedPaths, path)
+			return nil
+		},
+		cfg: config.Config{
+			APIKey:       "sk-key-1",
+			Endpoint:     "https://api.deepseek.com/chat/completions",
+			DefaultModel: "deepseek-flash",
+		},
+		sessionStates: make(map[int64]*sessionState),
+	}
+
+	waitUI := func(cond func() bool, desc string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for !cond() {
+			select {
+			case fn := <-uiCh:
+				fn()
+			case <-deadline:
+				t.Fatalf("等待超时: %s", desc)
+			}
+		}
+	}
+
+	tt := ui.NewTester(a.view, 1040, 700)
+
+	// 1. 拖入 report.pdf：后台 goroutine 以默认 text_recognition 开始预上传，期间禁止发送
+	if !tt.DropFiles(600, 300, pdfPath) {
+		t.Fatal("聊天区应接受拖入 PDF")
+	}
+	<-firstUploadStarted
+	tt.Frame()
+	draft := a.sessionState(0)
+	if len(draft.pendingFiles) != 1 || draft.pendingFiles[0].status != fileUploading {
+		t.Fatalf("预上传中状态异常: %+v", draft.pendingFiles)
+	}
+	if !tt.HasText("上传解析中…") {
+		t.Fatalf("上传中应显示进度文案，当前文本: %q", tt.Texts())
+	}
+	// 上传未完成时点击“发送”或直接调用 submit 均被阻止
+	_ = tt.Click("发送")
+	a.submit(0, "")
+	if a.sessions.selectedID != 0 {
+		t.Fatal("附件上传中不应允许提交")
+	}
+
+	// 2. 放行首次请求返回 500 失败 -> 展示“重试”，勾选“识别文档图表”开启后点击重试 -> 使用 rich_layout_recognition 成功
+	close(releaseFirstUpload)
+	waitUI(func() bool { return draft.pendingFiles[0].status == fileFailed }, "首次上传失败")
+	tt.Frame()
+	if !tt.HasText("重试") {
+		t.Fatalf("上传失败后应展示重试按钮，当前文本: %q", tt.Texts())
+	}
+
+	mustClick(t, tt, "选项")
+	mustClick(t, tt, "识别文档图表")
+	mustClick(t, tt, "选项")
+	mustClick(t, tt, "重试上传 report.pdf")
+	waitUI(func() bool { return draft.pendingFiles[0].status == fileReady }, "重试后上传就绪")
+	tt.Frame()
+	if !tt.HasText("含图表识别") {
+		t.Fatalf("开启识别文档图表并重试后应显示含图表识别，当前文本: %q", tt.Texts())
+	}
+
+	mu.Lock()
+	if len(uploads) != 2 {
+		mu.Unlock()
+		t.Fatalf("预期 2 次上传请求，实际 = %d", len(uploads))
+	}
+	if uploads[0].purpose != apis.FilePurposeTextRecognition ||
+		uploads[1].purpose != apis.FilePurposeRichLayoutRecognition ||
+		uploads[1].anchor != "created_at" || uploads[1].seconds != "2592000" {
+		mu.Unlock()
+		t.Fatalf("上传参数不符合预期: %+v", uploads)
+	}
+	mu.Unlock()
+
+	// 3. 仅携带就绪文件点击“发送”（不输入文本）：懒建会话、备份至 attachments/file/<sid>/、请求携带 file_id
+	mustClick(t, tt, "发送")
+	sid := a.sessions.selectedID
+	if sid == 0 || len(a.sessions.list) != 1 || a.sessions.list[0].Title != "report.pdf" {
+		t.Fatalf("纯文件懒创建会话标题异常: sid=%d list=%+v", sid, a.sessions.list)
+	}
+	state := a.sessionState(sid)
+	waitUI(func() bool { return !state.running }, "纯文件对话完成")
+	if state.err != nil {
+		t.Fatalf("纯文件提交出错: %v", state.err)
+	}
+
+	mu.Lock()
+	chatBodyStr := string(chatBody)
+	mu.Unlock()
+	if !strings.Contains(chatBodyStr, `"type":"file"`) || !strings.Contains(chatBodyStr, `"file_id":"file-api-2"`) {
+		t.Fatalf("聊天请求体未包含 file_id 块: %s", chatBodyStr)
+	}
+	if len(state.messages) != 2 || len(state.messages[0].Files) != 1 {
+		t.Fatalf("完成后历史消息附件异常: %+v", state.messages)
+	}
+	savedFile := state.messages[0].Files[0]
+	wantDir := filepath.Join(dir, "attachments", "file", fmt.Sprint(sid))
+	if !strings.HasPrefix(savedFile.Path, wantDir+string(filepath.Separator)) {
+		t.Fatalf("附件原件未备份到 attachments/file/%d: %q", sid, savedFile.Path)
+	}
+
+	// 4. 点击历史消息中的文件卡片，调用系统打开本地备份路径
+	tt.Frame()
+	mustClick(t, tt, "打开文件 report.pdf")
+	if len(openedPaths) != 1 || openedPaths[0] != savedFile.Path {
+		t.Fatalf("点击历史文件卡片打开路径不符: got=%q want=%q", openedPaths, savedFile.Path)
+	}
+
+	// 5. 再拖入草稿 notes.txt 后在设置中更换 APIKey：旧云端 file_id 被删除，并用新 Key 自动重传
+	if !tt.DropFiles(600, 300, notesPath) {
+		t.Fatal("聊天区应接受拖入 notes.txt")
+	}
+	waitUI(func() bool {
+		return len(state.pendingFiles) == 1 && state.pendingFiles[0].status == fileReady
+	}, "notes.txt 首次预上传就绪")
+	oldDraftID := state.pendingFiles[0].fileID
+
+	if err := a.saveConfig(config.Config{
+		APIKey:       "sk-key-2",
+		Endpoint:     "https://api.deepseek.com/chat/completions",
+		DefaultModel: "deepseek-flash",
+	}); err != nil {
+		t.Fatalf("切换 APIKey 失败: %v", err)
+	}
+	waitUI(func() bool {
+		return len(state.pendingFiles) == 1 &&
+			state.pendingFiles[0].status == fileReady &&
+			state.pendingFiles[0].fileID != oldDraftID
+	}, "切换 APIKey 后 notes.txt 自动重传就绪")
+	newDraftID := state.pendingFiles[0].fileID
+
+	select {
+	case del := <-deletedCh:
+		if del.id != oldDraftID || del.auth != "Bearer sk-key-1" {
+			t.Fatalf("切换 APIKey 删除旧云端文件参数异常: %+v，预期 id=%q oldKey", del, oldDraftID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("切换 APIKey 后未删除旧 Key 下的云端草稿文件")
+	}
+
+	// 6. 删除会话：同时异步清理历史 file-api-2 与未发草稿 newDraftID，且清理本地 attachments/file/<sid>/
+	if err := a.deleteSession(sid); err != nil {
+		t.Fatalf("删除会话失败: %v", err)
+	}
+	deletedSet := make(map[string]bool)
+	deadline := time.After(3 * time.Second)
+	for len(deletedSet) < 2 {
+		select {
+		case del := <-deletedCh:
+			deletedSet[del.id] = true
+		case <-deadline:
+			t.Fatalf("删除会话后未收齐云端文件清理请求，已收到: %+v", deletedSet)
+		}
+	}
+	if !deletedSet["file-api-2"] || !deletedSet[newDraftID] {
+		t.Fatalf("删除会话清理的云端 file_id 不完整: %+v，预期含 file-api-2 与 %s", deletedSet, newDraftID)
+	}
+	if _, err := os.Stat(wantDir); !os.IsNotExist(err) {
+		t.Fatalf("删除会话后本地附件目录应已移除，stat err = %v", err)
 	}
 }

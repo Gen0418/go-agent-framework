@@ -151,12 +151,16 @@ func TestPrintHistoryImages(t *testing.T) {
 				{Path: "attachments/pic/1/a.png", MIME: "image/png", Name: "error.png"},
 				{Path: "attachments/pic/1/b.png", MIME: "image/png"},
 			},
+			Files: []apis.File{
+				{FileID: "file-api-1", Name: "report.pdf"},
+				{FileID: "file-api-2"},
+			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("PrintHistory 失败: %v", err)
 	}
-	want := "\n[图片: error.png]\n[图片]\n看看报错"
+	want := "\n[图片: error.png]\n[图片]\n[文件: report.pdf]\n[文件]\n看看报错"
 	if out.String() != want {
 		t.Fatalf("带图历史输出 = %q，预期 %q", out.String(), want)
 	}

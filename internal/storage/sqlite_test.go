@@ -496,6 +496,104 @@ func TestSaveLoadAndDeleteSessionImages(t *testing.T) {
 	}
 }
 
+func TestSaveLoadListAndDeleteSessionFiles(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agent.db")
+	store := openTestStore(t, dbPath)
+
+	sid1 := createTestSession(t, store, "文件会话1")
+	sid2 := createTestSession(t, store, "文件会话2")
+
+	srcPDF := filepath.Join(t.TempDir(), "Q4 财报.pdf")
+	pdfBytes := []byte("%PDF-1.7 report body")
+	if err := os.WriteFile(srcPDF, pdfBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 空内容与不存在会话应报错
+	if _, err := store.SaveFile(t.Context(), sid1, apis.File{FileID: "file-api-x", Name: "empty.pdf"}, "", nil); err == nil {
+		t.Fatal("空文件内容应报错")
+	}
+	if _, err := store.SaveFile(t.Context(), 9999, apis.File{FileID: "file-api-x", Name: "a.pdf"}, srcPDF, nil); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("不存在会话保存文件返回 = %v，预期包装 sql.ErrNoRows", err)
+	}
+
+	file1, err := store.SaveFile(t.Context(), sid1, apis.File{
+		FileID:    "file-api-1",
+		Purpose:   apis.FilePurposeRichLayoutRecognition,
+		ExpiresAt: 1800000000,
+	}, srcPDF, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file2, err := store.SaveFile(t.Context(), sid2, apis.File{
+		FileID:  "file-api-2",
+		Name:    "notes.md",
+		Purpose: apis.FilePurposeUserData,
+	}, "", []byte("# notes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantPrefix := filepath.Join(dir, "attachments", "file", "1") + string(filepath.Separator)
+	if !strings.HasPrefix(file1.Path, wantPrefix) || file1.Name != "Q4 财报.pdf" || file1.Size != int64(len(pdfBytes)) || file1.FileID != "file-api-1" {
+		t.Fatalf("SaveFile 返回元数据异常: %+v", file1)
+	}
+
+	msg1 := apis.Message{Role: "user", Content: "总结财报", Files: []apis.File{file1}}
+	msg2 := apis.Message{Role: "user", Content: "看笔记", Files: []apis.File{file2}}
+	if err := store.AppendMessage(t.Context(), sid1, msg1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendMessage(t.Context(), sid2, msg2); err != nil {
+		t.Fatal(err)
+	}
+
+	// 数据库内应仅存相对路径
+	var rawFiles string
+	if err := store.db.QueryRowContext(t.Context(), `SELECT files FROM messages WHERE session_id = ?`, sid1).Scan(&rawFiles); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rawFiles, `"attachments/file/1/`) || strings.Contains(rawFiles, dir) {
+		t.Fatalf("库内应存储相对路径，实际 files = %s", rawFiles)
+	}
+
+	ids, err := store.ListSessionFileIDs(t.Context(), sid1)
+	if err != nil || !reflect.DeepEqual(ids, []string{"file-api-1"}) {
+		t.Fatalf("ListSessionFileIDs = (%v, %v)，预期 [file-api-1]", ids, err)
+	}
+
+	// 重开数据库后可完整还原
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openTestStore(t, dbPath)
+	assertHistory(t, reopened, sid1, []apis.Message{msg1})
+	assertHistory(t, reopened, sid2, []apis.Message{msg2})
+
+	// 删除会话 1 应清理 attachments/file/1 目录，不影响会话 2
+	if err := reopened.DeleteSession(t.Context(), sid1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "attachments", "file", "1")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("删除会话 1 后文件目录仍存在: err=%v", err)
+	}
+	if _, err := os.Stat(file2.Path); err != nil {
+		t.Fatalf("删除会话 1 不应影响会话 2 文件: err=%v", err)
+	}
+
+	// files JSON 损坏时应返回错误
+	brokenID := createTestSession(t, reopened, "损坏文件记录")
+	if _, err := reopened.db.ExecContext(t.Context(),
+		`INSERT INTO messages (session_id, role, files) VALUES (?, 'user', '[')`, brokenID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.LoadHistory(t.Context(), brokenID); err == nil {
+		t.Fatal("损坏的 files JSON 应返回错误")
+	}
+}
+
 func openTestStore(t *testing.T, path string) *Store {
 	t.Helper()
 	store, err := Open(t.Context(), path)

@@ -10,10 +10,7 @@ import (
 	"go-agent-framework/internal/storage"
 )
 
-type scrollKey int64
-type inputKey int64
-
-// 待发送的草稿图片附件（发送时才持久化写入 attachments/pic/<sessionID>/）
+// 待发送的剪贴板图片草稿（走内联 Base64，发送时写入 attachments/pic/<sessionID>/）
 type pendingImage struct {
 	id   int64
 	name string
@@ -21,15 +18,49 @@ type pendingImage struct {
 	data []byte
 }
 
+type fileUploadStatus uint8
+
+const (
+	fileUploading fileUploadStatus = iota
+	fileReady
+	fileFailed
+)
+
+// 云端预上传文件所绑定的接口地址与凭据范围，用于配置变更时判断是否需要重传
+type uploadScope struct {
+	endpoint string
+	apiKey   string
+}
+
+// 待发送的文件附件草稿（经 + 附件 或拖拽添加，后台独立 goroutine 预上传获取 file_id）
+type pendingFile struct {
+	id          int64
+	srcPath     string
+	name        string
+	size        int64
+	purpose     string
+	isDocument  bool
+	isImage     bool
+	status      fileUploadStatus
+	fileID      string
+	expiresAt   int64
+	uploadScope uploadScope
+	uploadSeq   uint64
+	errMsg      string
+	cancel      context.CancelFunc
+}
+
 // 单会话状态
 type sessionState struct {
 	loop          *agent.Loop        // 会话所绑定 Loop
 	opts          apis.StreamOptions // 会话设置项(Thinking/ReasoningEffort/Tools)
+	docRichLayout bool               // 文档解析是否启用图表/版面识别（零值 false 默认使用 text_recognition）
 	messages      []*chatMessage
 	curReply      *chatMessage
 	confirm       *confirmToolCall
 	inputText     string         // 提交内容
-	pendingImages []pendingImage // 待发送图片附件草稿
+	pendingImages []pendingImage // 剪贴板待发图片草稿（Base64 内联）
+	pendingFiles  []*pendingFile // 附件按钮/拖拽待发文件草稿（Files API 预上传）
 	historyLoaded bool           // 判断会话内容是否已加载
 	running       bool           // 判断会话是否正在运行
 	cancel        context.CancelFunc
@@ -109,6 +140,28 @@ func (s *sessionState) pendingImageBytes() int64 {
 		total += int64(len(img.data))
 	}
 	return total
+}
+
+func (s *sessionState) addPendingFile(file *pendingFile) {
+	s.pendingFiles = append(s.pendingFiles, file)
+}
+
+func (s *sessionState) removePendingFile(id int64) (*pendingFile, bool) {
+	idx := slices.IndexFunc(s.pendingFiles, func(f *pendingFile) bool {
+		return f.id == id
+	})
+	if idx < 0 {
+		return nil, false
+	}
+	removed := s.pendingFiles[idx]
+	s.pendingFiles = slices.Delete(s.pendingFiles, idx, idx+1)
+	return removed, true
+}
+
+func (s *sessionState) hasBlockingFiles() bool {
+	return slices.ContainsFunc(s.pendingFiles, func(f *pendingFile) bool {
+		return f.status != fileReady
+	})
 }
 
 func (s *sessionState) resolveConfirm(allow bool) {
