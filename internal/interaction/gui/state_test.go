@@ -204,32 +204,43 @@ func TestSessionStateOptsIsolation(t *testing.T) {
 	}
 }
 
-func TestSessionStateSetToolsEnabled(t *testing.T) {
+func TestSessionStateToolGroupToggles(t *testing.T) {
 	s := &sessionState{}
-	defaults := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
+	local := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
+	web := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "web_search"}}}
 
-	// 无默认工具时开启仍保持为空
-	s.setToolsEnabled(true, nil)
-	if len(s.opts.Tools) != 0 {
-		t.Fatal("默认工具为空时不应启用工具")
+	// 空工具分组开启时保持为空
+	s.setToolGroupEnabled(true, nil)
+	if len(s.opts.Tools) != 0 || s.hasAnyTool(local) || s.hasAnyTool(web) {
+		t.Fatalf("空分组不应启用任何工具: %+v", s.opts.Tools)
 	}
 
-	// 开启工具从 defaults 拷贝，关闭后置空，再次开启能恢复
-	s.setToolsEnabled(true, defaults)
-	if len(s.opts.Tools) != 1 || s.opts.Tools[0].Function.Name != "bash" {
-		t.Fatalf("开启工具后 Tools = %+v", s.opts.Tools)
+	// 同时开启本地命令与联网搜索，且各自互不干扰
+	s.setToolGroupEnabled(true, local)
+	s.setToolGroupEnabled(true, web)
+	if !s.hasAnyTool(local) || !s.hasAnyTool(web) || len(s.opts.Tools) != 2 {
+		t.Fatalf("同时开启两组工具后 Tools = %+v", s.opts.Tools)
 	}
+	// 修改会话切片不应污染默认定义
 	s.opts.Tools[0].Function.Name = "changed"
-	if defaults[0].Function.Name != "bash" {
-		t.Fatalf("修改会话工具切片污染了 defaults: %+v", defaults)
+	if local[0].Function.Name != "bash" {
+		t.Fatalf("修改会话工具切片污染了 local 默认定义: %+v", local)
+	}
+	s.opts.Tools[0].Function.Name = "bash"
+
+	// 仅关闭本地命令，保留联网搜索
+	s.setToolGroupEnabled(false, local)
+	if s.hasAnyTool(local) || !s.hasAnyTool(web) || len(s.opts.Tools) != 1 || s.opts.Tools[0].Function.Name != "web_search" {
+		t.Fatalf("关闭本地命令后应保留联网搜索，实际 = %+v", s.opts.Tools)
 	}
 
-	s.setToolsEnabled(false, defaults)
+	// 关闭联网搜索后清空，重新开启本地命令恢复 bash
+	s.setToolGroupEnabled(false, web)
 	if len(s.opts.Tools) != 0 {
-		t.Fatalf("关闭工具后 Tools 应为空，实际 = %+v", s.opts.Tools)
+		t.Fatalf("两组均关闭后 Tools 应为空，实际 = %+v", s.opts.Tools)
 	}
-	s.setToolsEnabled(true, defaults)
-	if len(s.opts.Tools) != 1 || s.opts.Tools[0].Function.Name != "bash" {
-		t.Fatalf("重新开启工具后未恢复默认定义: %+v", s.opts.Tools)
+	s.setToolGroupEnabled(true, local)
+	if !s.hasAnyTool(local) || s.hasAnyTool(web) || len(s.opts.Tools) != 1 || s.opts.Tools[0].Function.Name != "bash" {
+		t.Fatalf("重新开启本地命令后未恢复 bash: %+v", s.opts.Tools)
 	}
 }

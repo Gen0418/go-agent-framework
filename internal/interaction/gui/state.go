@@ -91,16 +91,38 @@ func (s *sessionState) resolveConfirm(allow bool) {
 	}
 }
 
-// 切换本会话是否启用工具
-// 重新开启时从默认工具列表拷贝恢复，避免共享切片
-func (s *sessionState) setToolsEnabled(enabled bool, defaults []apis.Tool) {
-	if !enabled {
-		s.opts.Tools = nil
+// 判断某一组工具（如本地命令或联网搜索）是否在当前会话处于启用状态
+func (s *sessionState) hasAnyTool(group []apis.Tool) bool {
+	for _, target := range group {
+		if slices.ContainsFunc(s.opts.Tools, func(cur apis.Tool) bool {
+			return cur.Function.Name == target.Function.Name
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+// 独立开关本会话的指定工具分组
+// 仅增删该组工具定义，保留其他分组状态，并拷贝默认定义避免共享底层切片
+func (s *sessionState) setToolGroupEnabled(enabled bool, group []apis.Tool) {
+	if len(group) == 0 {
 		return
 	}
-	if len(s.opts.Tools) == 0 {
-		s.opts.Tools = slices.Clone(defaults)
+	names := make(map[string]struct{}, len(group))
+	for _, target := range group {
+		names[target.Function.Name] = struct{}{}
 	}
+	filtered := make([]apis.Tool, 0, len(s.opts.Tools)+len(group))
+	for _, cur := range s.opts.Tools {
+		if _, inGroup := names[cur.Function.Name]; !inGroup {
+			filtered = append(filtered, cur)
+		}
+	}
+	if enabled {
+		filtered = append(filtered, slices.Clone(group)...)
+	}
+	s.opts.Tools = filtered
 }
 
 type confirmToolCall struct {

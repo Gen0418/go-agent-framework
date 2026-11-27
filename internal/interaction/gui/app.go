@@ -7,11 +7,13 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"go-agent-framework/internal/agent"
 	"go-agent-framework/internal/apis"
 	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/storage"
+	"go-agent-framework/internal/tools"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -29,6 +31,10 @@ type app struct {
 	cfg         config.Config      // 应用级配置项(APIKey/Endpoint/DefaultModel)
 	cfgPath     string             // 本地配置文件路径
 	defaultOpts apis.StreamOptions // 默认会话设置(Thinking/ReasoningEffort/Tools)
+	registry    *tools.Registry    // 全量可用工具注册表（本地命令 + 联网搜索）
+	localTools  []apis.Tool        // 本地命令工具定义
+	webTools    []apis.Tool        // 联网搜索工具定义
+	liveClient  atomic.Pointer[apis.Client]
 
 	// 会话级信息
 	sessions         sessionList
@@ -43,6 +49,38 @@ type app struct {
 
 	// 应用级错误
 	err error
+}
+
+func (a *app) syncClient() {
+	a.liveClient.Store(&apis.Client{
+		Endpoint: a.cfg.Endpoint,
+		APIKey:   a.cfg.APIKey,
+		Model:    a.cfg.DefaultModel,
+	})
+}
+
+func (a *app) currentClient() *apis.Client {
+	return a.liveClient.Load()
+}
+
+// 初始化本地命令与联网搜索工具注册表
+// 同时按分组记录定义，供会话级独立开关使用
+func (a *app) initDefaultTools() {
+	a.syncClient()
+	local := tools.LocalTools()
+	web := []tools.Tool{
+		tools.WebSearch{Client: a.currentClient},
+		tools.WebFetch{Client: a.currentClient},
+	}
+	all := make([]tools.Tool, 0, len(local)+len(web))
+	all = append(all, local...)
+	all = append(all, web...)
+	a.registry = tools.NewRegistry(all...)
+	a.localTools = tools.NewRegistry(local...).Definitions()
+	a.webTools = tools.NewRegistry(web...).Definitions()
+	if len(a.defaultOpts.Tools) == 0 {
+		a.defaultOpts.Tools = a.registry.Definitions()
+	}
 }
 
 func (a *app) chatList(id int64) *ui.ListState {
@@ -158,16 +196,22 @@ func (a *app) renderActiveChat(c *ui.Context) {
 		confirm:   curSessionState.confirm,
 		onConfirm: curSessionState.resolveConfirm,
 		composer: composerProps{
-			sessionID:   curSession.ID,
-			inputText:   &curSessionState.inputText,
-			model:       a.cfg.DefaultModel,
-			opts:        &curSessionState.opts,
-			hasTools:    len(a.defaultOpts.Tools) > 0,
+			sessionID:     curSession.ID,
+			inputText:     &curSessionState.inputText,
+			model:         a.cfg.DefaultModel,
+			opts:          &curSessionState.opts,
+			hasLocalTools: len(a.localTools) > 0,
+			localToolsOn:  curSessionState.hasAnyTool(a.localTools),
+			onToggleLocalTools: func(enabled bool) {
+				curSessionState.setToolGroupEnabled(enabled, a.localTools)
+			},
+			hasWebTools: len(a.webTools) > 0,
+			webToolsOn:  curSessionState.hasAnyTool(a.webTools),
+			onToggleWebTools: func(enabled bool) {
+				curSessionState.setToolGroupEnabled(enabled, a.webTools)
+			},
 			optsPopover: &a.optsPopover,
 			running:     curSessionState.running,
-			onToggleTools: func(enabled bool) {
-				curSessionState.setToolsEnabled(enabled, a.defaultOpts.Tools)
-			},
 			onSubmit: func(text string) {
 				a.submit(curSession.ID, text)
 			},
@@ -291,6 +335,7 @@ func (a *app) saveConfig(cfg config.Config) error {
 		return err
 	}
 	a.cfg = normalized
+	a.syncClient()
 	return nil
 }
 
@@ -332,7 +377,7 @@ func (a *app) submit(submitID int64, submitInputText string) {
 
 	submitLoop := submitState.loop // 取得指定 session 的 loop
 	if submitLoop == nil {         // loop 为空，新建
-		submitLoop = agent.NewLoop(a.store, nil)
+		submitLoop = agent.NewLoop(a.store, a.registry)
 		if err := submitLoop.BindSession(a.ctx, submitID); err != nil { // 绑定 loop 至 session
 			submitState.err = err
 			return
@@ -340,11 +385,8 @@ func (a *app) submit(submitID int64, submitInputText string) {
 		submitState.loop = submitLoop
 	}
 
-	turnClient := &apis.Client{
-		Endpoint: a.cfg.Endpoint,
-		APIKey:   a.cfg.APIKey,
-		Model:    a.cfg.DefaultModel,
-	}
+	a.syncClient()
+	turnClient := a.currentClient()
 	turnOpts := submitState.opts
 	turnOpts.Tools = slices.Clone(turnOpts.Tools)
 
@@ -442,6 +484,7 @@ func Run(ctx context.Context, store *storage.Store, cfg config.Config, cfgPath s
 		},
 		sessionStates: make(map[int64]*sessionState),
 	}
+	a.initDefaultTools()
 
 	if len(sessions) > 0 { // 默认加载第一条
 		if err := a.selectSession(a.sessions.list[0].ID); err != nil {

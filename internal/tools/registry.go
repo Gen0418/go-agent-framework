@@ -45,10 +45,15 @@ func NewRegistry(list ...Tool) *Registry {
 	return r
 }
 
-// DefaultRegistry 返回当前平台内置默认工具的注册表
+// LocalTools 返回当前平台内置的本地命令工具列表
 // 非 Windows 仅包含 bash；Windows 始终包含 powershell，检测到 Git Bash 时额外附加 bash
+func LocalTools() []Tool {
+	return defaultTools()
+}
+
+// DefaultRegistry 返回当前平台内置本地命令工具的注册表
 func DefaultRegistry() *Registry {
-	return NewRegistry(defaultTools()...)
+	return NewRegistry(LocalTools()...)
 }
 
 func (r *Registry) Definitions() []apis.Tool {

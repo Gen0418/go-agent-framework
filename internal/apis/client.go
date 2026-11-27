@@ -2,10 +2,14 @@ package apis
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
-// 模型接口客户端（HTTP 为空时复用默认超时客户端）
+const defaultBaseURL = "https://api.deepseek.com"
+
+// 模型接口客户端（HTTP 为空时复用默认连接池客户端）
 type Client struct {
 	Endpoint string
 	APIKey   string
@@ -13,10 +17,17 @@ type Client struct {
 	HTTP     *http.Client
 }
 
-var defaultHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		ResponseHeaderTimeout: 60 * time.Second,
-	},
+var defaultHTTPClient = newDefaultHTTPClient()
+
+func newDefaultHTTPClient() *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	}
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	}
+	transport.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: transport}
 }
 
 func (c *Client) httpClient() *http.Client {
@@ -29,7 +40,43 @@ func (c *Client) httpClient() *http.Client {
 func (c *Client) setStreamHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.APIKey))
+}
+
+func (c *Client) setJSONHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.APIKey))
+}
+
+// 从对话接口 Endpoint 推算同源工具 API 路径
+// 自动剥离 /chat/completions 与 /v1/chat/completions 后缀，空或非法地址回退官方域名
+func (c *Client) toolEndpoint(apiPath string) string {
+	return deriveBaseURL(c.Endpoint) + apiPath
+}
+
+func deriveBaseURL(endpoint string) string {
+	raw := strings.TrimSpace(endpoint)
+	if raw == "" {
+		return defaultBaseURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return defaultBaseURL
+	}
+
+	path := strings.TrimRight(u.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/v1/chat/completions"):
+		path = strings.TrimSuffix(path, "/v1/chat/completions")
+	case strings.HasSuffix(path, "/chat/completions"):
+		path = strings.TrimSuffix(path, "/chat/completions")
+	}
+	u.Path = strings.TrimRight(path, "/")
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 func (c *Client) newChatRequest(msgs []Message, opts StreamOptions) chatRequest {

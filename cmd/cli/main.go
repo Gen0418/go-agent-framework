@@ -30,16 +30,20 @@ func run() error {
 		return err
 	}
 	ctx := context.Background()
-	reg := tools.DefaultRegistry()
-	opts := apis.StreamOptions{
-		Thinking:        true,
-		ReasoningEffort: "low",
-		Tools:           reg.Definitions(),
-	}
 	client := &apis.Client{
 		Endpoint: cfg.Endpoint,
 		APIKey:   cfg.APIKey,
 		Model:    cfg.DefaultModel,
+	}
+	allTools := append(tools.LocalTools(),
+		tools.WebSearch{Client: func() *apis.Client { return client }},
+		tools.WebFetch{Client: func() *apis.Client { return client }},
+	)
+	reg := tools.NewRegistry(allTools...)
+	opts := apis.StreamOptions{
+		Thinking:        true,
+		ReasoningEffort: "low",
+		Tools:           reg.Definitions(),
 	}
 	store, err := storage.Open(ctx, "agent.db")
 	if err != nil {

@@ -14,16 +14,20 @@ var reasoningEfforts = []string{"low", "high", "max"}
 
 // 输入区参数
 type composerProps struct {
-	sessionID     int64
-	inputText     *string
-	model         string
-	opts          *apis.StreamOptions
-	hasTools      bool
-	optsPopover   *optsPopover
-	running       bool
-	onToggleTools func(enabled bool)
-	onSubmit      func(text string)
-	onStop        func()
+	sessionID          int64
+	inputText          *string
+	model              string
+	opts               *apis.StreamOptions
+	hasLocalTools      bool
+	localToolsOn       bool
+	onToggleLocalTools func(enabled bool)
+	hasWebTools        bool
+	webToolsOn         bool
+	onToggleWebTools   func(enabled bool)
+	optsPopover        *optsPopover
+	running            bool
+	onSubmit           func(text string)
+	onStop             func()
 }
 
 // 底部输入区组件
@@ -55,7 +59,7 @@ func renderComposer(c *ui.Context, props composerProps) {
 			})
 
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
-			props.optsPopover.view(c, props.model, props.opts, props.hasTools, props.onToggleTools)
+			props.optsPopover.view(c, props)
 			renderOptsSummary(c, props.opts)
 			ui.Spacer(c)
 			renderSubmitButton(c, props)
@@ -71,16 +75,20 @@ func renderOptsSummary(c *ui.Context, opts *apis.StreamOptions) {
 	if effort == "" {
 		effort = reasoningEfforts[0]
 	}
-	ui.Text(c, "思考强度 "+effort).FontSize(12).TextColor(c.Theme().TextMuted).SingleLine()
+	ui.Text(c, "思考强度 "+effort).
+		FontSize(12).
+		TextColor(c.Theme().TextMuted).
+		SingleLine().
+		MinWidth(0)
 }
 
 // 会话选项浮层组件
-// 包含当前模型展示、思考开关与强度切换、工具调用开关
+// 包含当前模型展示、思考开关与强度切换，以及独立的本地命令/联网搜索开关
 type optsPopover struct {
 	visible bool
 }
 
-func (p *optsPopover) view(c *ui.Context, model string, opts *apis.StreamOptions, hasTools bool, onToggleTools func(enabled bool)) {
+func (p *optsPopover) view(c *ui.Context, props composerProps) {
 	t := c.Theme()
 	optsButton := chipButton(c, "选项", "选项", p.visible)
 	if optsButton.Clicked() {
@@ -89,25 +97,34 @@ func (p *optsPopover) view(c *ui.Context, model string, opts *apis.StreamOptions
 
 	ui.Popover(c, optsButton, &p.visible, func() {
 		ui.Column(c).MinWidth(230).Padding(4).Gap(10).Children(func() {
-			ui.Text(c, fmt.Sprintf("模型: %s", model)).FontSize(12).TextColor(t.TextMuted).SingleLine()
+			ui.Text(c, fmt.Sprintf("模型: %s", props.model)).FontSize(12).TextColor(t.TextMuted).SingleLine()
 			ui.Divider(c)
 
-			ui.Checkbox(c, &opts.Thinking, "思考")
-			if opts.Thinking {
-				effortIdx := slices.Index(reasoningEfforts, opts.ReasoningEffort)
+			ui.Checkbox(c, &props.opts.Thinking, "思考")
+			if props.opts.Thinking {
+				effortIdx := slices.Index(reasoningEfforts, props.opts.ReasoningEffort)
 				if effortIdx < 0 { // 未设强度时默认 low
 					effortIdx = 0
-					opts.ReasoningEffort = reasoningEfforts[0]
+					props.opts.ReasoningEffort = reasoningEfforts[0]
 				}
 				if ui.Segmented(c, &effortIdx, reasoningEfforts...).FillWidth().Changed() {
-					opts.ReasoningEffort = reasoningEfforts[effortIdx]
+					props.opts.ReasoningEffort = reasoningEfforts[effortIdx]
 				}
 			}
 
-			if hasTools {
-				toolsOn := len(opts.Tools) > 0
-				if ui.Checkbox(c, &toolsOn, "允许工具调用").Changed() && onToggleTools != nil {
-					onToggleTools(toolsOn)
+			if props.hasLocalTools || props.hasWebTools {
+				ui.Divider(c)
+			}
+			if props.hasLocalTools {
+				localOn := props.localToolsOn
+				if ui.Checkbox(c, &localOn, "允许本地命令").Changed() && props.onToggleLocalTools != nil {
+					props.onToggleLocalTools(localOn)
+				}
+			}
+			if props.hasWebTools {
+				webOn := props.webToolsOn
+				if ui.Checkbox(c, &webOn, "允许联网搜索").Changed() && props.onToggleWebTools != nil {
+					props.onToggleWebTools(webOn)
 				}
 			}
 		})

@@ -22,12 +22,20 @@ import (
 )
 
 func TestSessionOptsPopover(t *testing.T) {
+	localTools := []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}}
+	webTools := []apis.Tool{
+		{Type: "function", Function: apis.FunctionDef{Name: "web_search"}},
+		{Type: "function", Function: apis.FunctionDef{Name: "web_fetch"}},
+	}
+
 	a := &app{
-		cfg: config.Config{DefaultModel: "deepseek-chat"},
+		cfg:        config.Config{DefaultModel: "deepseek-chat"},
+		localTools: localTools,
+		webTools:   webTools,
 		defaultOpts: apis.StreamOptions{
 			Thinking:        true,
 			ReasoningEffort: "low",
-			Tools:           []apis.Tool{{Type: "function", Function: apis.FunctionDef{Name: "bash"}}},
+			Tools:           append(append([]apis.Tool(nil), localTools...), webTools...),
 		},
 		sessions: sessionList{
 			list: []storage.Session{
@@ -40,22 +48,25 @@ func TestSessionOptsPopover(t *testing.T) {
 	}
 
 	tt := ui.NewTester(a.view, 960, 640)
+	if !tt.HasText("思考强度 low") || tt.HasText("联网搜索") {
+		t.Fatalf("输入区底部摘要应仅展示思考强度，不展示联网搜索，当前文本: %q", tt.Texts())
+	}
 
 	// 点击“选项”展开浮层
-	tt.Click("选项")
+	mustClick(t, tt, "选项")
 	if !tt.HasText("模型: deepseek-chat") {
 		t.Fatalf("展开选项浮层后未显示当前模型，当前文本: %q", tt.Texts())
 	}
 
 	// 切换思考强度为 high
-	tt.Click("high")
+	mustClick(t, tt, "high")
 	s1 := a.sessionState(1)
 	if s1.opts.ReasoningEffort != "high" {
 		t.Fatalf("切换强度后 ReasoningEffort = %q，预期 high", s1.opts.ReasoningEffort)
 	}
 
 	// 关闭思考后隐藏强度选项，但保留原强度值
-	tt.Click("思考")
+	mustClick(t, tt, "思考")
 	if s1.opts.Thinking || s1.opts.ReasoningEffort != "high" {
 		t.Fatalf("关闭思考后 opts = %+v，预期 Thinking=false 且保留 high", s1.opts)
 	}
@@ -63,22 +74,66 @@ func TestSessionOptsPopover(t *testing.T) {
 		t.Fatal("关闭思考后不应再显示思考强度选项")
 	}
 
-	// 关闭并重新开启工具调用
-	tt.Click("允许工具调用")
-	if len(s1.opts.Tools) != 0 {
-		t.Fatalf("关闭工具后 Tools 应为空，实际 = %+v", s1.opts.Tools)
+	// 独立关闭本地命令：保留整组联网工具（web_search + web_fetch）
+	mustClick(t, tt, "允许本地命令")
+	if len(s1.opts.Tools) != 2 || s1.opts.Tools[0].Function.Name != "web_search" || s1.opts.Tools[1].Function.Name != "web_fetch" {
+		t.Fatalf("关闭本地命令后应保留联网工具组，实际 = %+v", s1.opts.Tools)
 	}
-	tt.Click("允许工具调用")
+
+	// 独立关闭联网搜索：Tools 清空
+	mustClick(t, tt, "允许联网搜索")
+	if len(s1.opts.Tools) != 0 {
+		t.Fatalf("同时关闭两组工具后 Tools 应为空，实际 = %+v", s1.opts.Tools)
+	}
+
+	// 单独重新开启本地命令：仅恢复 bash
+	mustClick(t, tt, "允许本地命令")
 	if len(s1.opts.Tools) != 1 || s1.opts.Tools[0].Function.Name != "bash" {
-		t.Fatalf("重新开启工具后 Tools = %+v，预期恢复 bash", s1.opts.Tools)
+		t.Fatalf("重新开启本地命令后 Tools = %+v，预期仅恢复 bash", s1.opts.Tools)
 	}
 
 	// 切换到会话2，选项不受会话1影响
 	a.sessions.selectedID = 2
 	tt.Frame()
 	s2 := a.sessionState(2)
-	if !s2.opts.Thinking || s2.opts.ReasoningEffort != "low" || len(s2.opts.Tools) != 1 {
+	if !s2.opts.Thinking || s2.opts.ReasoningEffort != "low" || len(s2.opts.Tools) != 3 {
 		t.Fatalf("会话2 选项不应受会话1 影响: %+v", s2.opts)
+	}
+}
+
+func TestInitDefaultToolsAndLiveClient(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	a := &app{
+		cfgPath: cfgPath,
+		cfg: config.Config{
+			APIKey:       "sk-initial",
+			Endpoint:     "https://api.deepseek.com/chat/completions",
+			DefaultModel: "deepseek-flash",
+		},
+		sessionStates: make(map[int64]*sessionState),
+	}
+	a.initDefaultTools()
+
+	if a.registry == nil || len(a.localTools) == 0 ||
+		len(a.webTools) != 2 || a.webTools[0].Function.Name != "web_search" || a.webTools[1].Function.Name != "web_fetch" {
+		t.Fatalf("工具分组初始化异常: local=%+v web=%+v", a.localTools, a.webTools)
+	}
+	if cli := a.currentClient(); cli == nil || cli.APIKey != "sk-initial" || cli.Endpoint != "https://api.deepseek.com/chat/completions" {
+		t.Fatalf("初始 API 客户端异常: %+v", cli)
+	}
+
+	// 运行期在设置中更新 APIKey 与 Endpoint 后，客户端快照应即时刷新
+	err := a.saveConfig(config.Config{
+		APIKey:       "sk-updated",
+		Endpoint:     "https://proxy.example.com/ds/v1/chat/completions",
+		DefaultModel: "deepseek-pro",
+	})
+	if err != nil {
+		t.Fatalf("保存配置失败: %v", err)
+	}
+	if cli := a.currentClient(); cli == nil || cli.APIKey != "sk-updated" ||
+		cli.Endpoint != "https://proxy.example.com/ds/v1/chat/completions" || cli.Model != "deepseek-pro" {
+		t.Fatalf("保存设置后 API 客户端未刷新: %+v", cli)
 	}
 }
 
@@ -522,13 +577,14 @@ func TestComposerKeyboardAndConfirmCard(t *testing.T) {
 				})
 			}
 			renderComposer(c, composerProps{
-				sessionID:   1,
-				inputText:   &draft,
-				model:       "deepseek-chat",
-				opts:        &opts,
-				hasTools:    true,
-				optsPopover: &pop,
-				running:     running,
+				sessionID:     1,
+				inputText:     &draft,
+				model:         "deepseek-chat",
+				opts:          &opts,
+				hasLocalTools: true,
+				localToolsOn:  true,
+				optsPopover:   &pop,
+				running:       running,
 				onSubmit: func(text string) {
 					submitted = append(submitted, text)
 					draft = ""

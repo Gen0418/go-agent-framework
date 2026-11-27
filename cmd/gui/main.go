@@ -8,7 +8,6 @@ import (
 	"go-agent-framework/internal/config"
 	"go-agent-framework/internal/interaction/gui"
 	"go-agent-framework/internal/storage"
-	"go-agent-framework/internal/tools"
 )
 
 func main() {
@@ -27,7 +26,6 @@ func run() error {
 	opts := apis.StreamOptions{
 		Thinking:        true,
 		ReasoningEffort: "low",
-		Tools:           tools.DefaultRegistry().Definitions(),
 	}
 	store, err := storage.Open(ctx, "agent.db")
 	if err != nil {
